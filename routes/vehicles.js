@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const Vehicle = require('../models/Vehicle');
-const Student = require('../models/Student');
 
 // Get all vehicles
 router.get('/', async (req, res) => {
@@ -57,14 +56,6 @@ router.put('/:id', async (req, res) => {
 // Delete vehicle
 router.delete('/:id', async (req, res) => {
   try {
-    // Check if any students are assigned to this vehicle
-    const studentsCount = await Student.countDocuments({ vehicle_id: req.params.id });
-    if (studentsCount > 0) {
-      return res.status(400).json({ 
-        message: `Cannot delete vehicle. ${studentsCount} student(s) are currently assigned to it.` 
-      });
-    }
-    
     const vehicle = await Vehicle.findByIdAndDelete(req.params.id);
     if (!vehicle) {
       return res.status(404).json({ message: 'Vehicle not found' });

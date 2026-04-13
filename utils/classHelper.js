@@ -1,24 +1,16 @@
-// Standard classes mapping
+// Standard classes mapping for PlaySchool
 const STANDARD_CLASSES = {
-  '1': '1st Standard',
-  '2': '2nd Standard',
-  '3': '3rd Standard',
-  '4': '4th Standard',
-  '5': '5th Standard',
-  '6': '6th Standard',
-  '7': '7th Standard',
-  '8': '8th Standard',
-  '9': '9th Standard',
-  '10': '10th Standard',
-  '11': '11th Standard',
-  '12': '12th Standard',
+  'toddler': 'Toddler',
+  'pre-nursery': 'Pre-Nursery',
+  'nursery': 'Nursery',
+  'kg-1': 'KG-1',
 };
 
 const getClassName = (classId, classType = 'standard') => {
   if (classType === 'standard' && STANDARD_CLASSES[classId]) {
     return STANDARD_CLASSES[classId];
   }
-  return null;
+  return classId || 'N/A';
 };
 
 const isValidClassId = (classId, classType = 'standard') => {
@@ -28,8 +20,17 @@ const isValidClassId = (classId, classType = 'standard') => {
   return true; // For custom classes, validation happens at database level
 };
 
+const getAllClasses = () => {
+  return Object.entries(STANDARD_CLASSES).map(([id, name]) => ({
+    id,
+    name,
+    type: 'standard'
+  }));
+};
+
 module.exports = {
   STANDARD_CLASSES,
   getClassName,
   isValidClassId,
+  getAllClasses,
 };

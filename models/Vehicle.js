@@ -37,6 +37,15 @@ const vehicleSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  updated_at: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+vehicleSchema.pre('save', function(next) {
+  this.updated_at = Date.now();
+  next();
 });
 
 module.exports = mongoose.model('Vehicle', vehicleSchema);
