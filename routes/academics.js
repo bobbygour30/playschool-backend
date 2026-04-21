@@ -4,6 +4,7 @@ const Assessment = require('../models/Assessment');
 const Event = require('../models/Event');
 const Culmination = require('../models/Culmination');
 const AcademicClass = require('../models/AcademicClass');
+const Document = require('../models/Document');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
 // ==================== CLASS MANAGEMENT ====================
@@ -29,6 +30,193 @@ router.post('/classes', async (req, res) => {
   } catch (error) {
     console.error('Error creating class:', error);
     res.status(400).json({ message: error.message });
+  }
+});
+
+// ==================== DOCUMENT MANAGEMENT ====================
+
+// Get all documents for a specific class and month
+router.get('/documents/:classId/:month', async (req, res) => {
+  try {
+    const { classId, month } = req.params;
+    const documents = await Document.find({ 
+      class_id: classId, 
+      month: parseInt(month) 
+    }).populate('uploaded_by', 'name email').sort({ created_at: -1 });
+    
+    res.json(documents);
+  } catch (error) {
+    console.error('Error fetching documents:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get all documents for a specific class (all months)
+router.get('/documents/:classId', async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const documents = await Document.find({ class_id: classId })
+      .populate('uploaded_by', 'name email')
+      .sort({ month: 1, created_at: -1 });
+    
+    res.json(documents);
+  } catch (error) {
+    console.error('Error fetching documents:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get single document by ID
+router.get('/document/:id', async (req, res) => {
+  try {
+    const document = await Document.findById(req.params.id)
+      .populate('uploaded_by', 'name email');
+    
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+    
+    res.json(document);
+  } catch (error) {
+    console.error('Error fetching document:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Create/Upload document
+router.post('/documents', async (req, res) => {
+  try {
+    const {
+      class_id,
+      month,
+      title,
+      description,
+      file,
+      file_name,
+      file_type,
+      uploaded_by,
+    } = req.body;
+    
+    // Upload file to Cloudinary
+    let uploadedFileUrl = null;
+    if (file) {
+      uploadedFileUrl = await uploadToCloudinary(file, `academics/documents/${class_id}/${month}`);
+    }
+    
+    if (!uploadedFileUrl) {
+      return res.status(400).json({ message: 'Failed to upload file' });
+    }
+    
+    const document = new Document({
+      class_id,
+      month: parseInt(month),
+      title,
+      description: description || '',
+      file_name,
+      file_type,
+      file_url: uploadedFileUrl,
+      uploaded_by: uploaded_by || null,
+    });
+    
+    const savedDocument = await document.save();
+    const populatedDocument = await Document.findById(savedDocument._id)
+      .populate('uploaded_by', 'name email');
+    
+    res.status(201).json(populatedDocument);
+  } catch (error) {
+    console.error('Error uploading document:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Update document
+router.put('/document/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existingDocument = await Document.findById(id);
+    
+    if (!existingDocument) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+    
+    const {
+      title,
+      description,
+      file,
+      file_name,
+      file_type,
+    } = req.body;
+    
+    // Handle file update
+    let uploadedFileUrl = existingDocument.file_url;
+    if (file && file !== existingDocument.file_url) {
+      // Delete old file from Cloudinary
+      if (existingDocument.file_url) {
+        await deleteFromCloudinary(existingDocument.file_url);
+      }
+      // Upload new file
+      uploadedFileUrl = await uploadToCloudinary(file, `academics/documents/${existingDocument.class_id}/${existingDocument.month}`);
+    }
+    
+    const documentData = {
+      title,
+      description: description || '',
+      file_name: file_name || existingDocument.file_name,
+      file_type: file_type || existingDocument.file_type,
+      file_url: uploadedFileUrl,
+      updated_at: Date.now(),
+    };
+    
+    const document = await Document.findByIdAndUpdate(
+      id,
+      documentData,
+      { new: true, runValidators: true }
+    ).populate('uploaded_by', 'name email');
+    
+    res.json(document);
+  } catch (error) {
+    console.error('Error updating document:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Delete document
+router.delete('/document/:id', async (req, res) => {
+  try {
+    const document = await Document.findById(req.params.id);
+    
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+    
+    // Delete file from Cloudinary
+    if (document.file_url) {
+      await deleteFromCloudinary(document.file_url);
+    }
+    
+    await Document.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Document deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting document:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get document statistics
+router.get('/documents/stats/:classId', async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const stats = {};
+    
+    for (let month = 0; month < 12; month++) {
+      const count = await Document.countDocuments({ class_id: classId, month });
+      stats[month] = count;
+    }
+    
+    res.json(stats);
+  } catch (error) {
+    console.error('Error fetching document stats:', error);
+    res.status(500).json({ message: error.message });
   }
 });
 
@@ -573,6 +761,7 @@ router.get('/stats', async (req, res) => {
       const events = await Event.countDocuments({ class_id: classId });
       const upcomingEvents = await Event.countDocuments({ class_id: classId, status: 'upcoming' });
       const culminations = await Culmination.countDocuments({ class_id: classId });
+      const documents = await Document.countDocuments({ class_id: classId });
       
       stats[classId] = {
         totalAssessments: assessments,
@@ -580,6 +769,7 @@ router.get('/stats', async (req, res) => {
         totalEvents: events,
         upcomingEvents,
         totalCulminations: culminations,
+        totalDocuments: documents,
       };
     }
     
