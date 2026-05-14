@@ -76,6 +76,9 @@ app.use('/api/vehicles', require('./routes/vehicles'));
 // Classes Management (For academic reference)
 app.use('/api/classes', require('./routes/classes'));
 
+app.use('/api/parents', require('./routes/parents'));
+app.use('/api/faculty-auth', require('./routes/facultyAuth'));
+
 // ==================== ERROR HANDLER ====================
 app.use(require('./middleware/errorHandler'));
 
