@@ -90,6 +90,25 @@ const facultySchema = new mongoose.Schema({
     default: '',
   },
   
+  // Sync fields (NEW)
+  sync_status: {
+    type: String,
+    enum: ['pending', 'synced', 'failed'],
+    default: 'pending',
+  },
+  sync_attempts: {
+    type: Number,
+    default: 0,
+  },
+  synced_at: {
+    type: Date,
+    default: null,
+  },
+  sync_error: {
+    type: String,
+    default: null,
+  },
+  
   created_at: {
     type: Date,
     default: Date.now,
