@@ -10,13 +10,15 @@ const syncToMobileBackend = async (facultyData) => {
       return { success: false, error: 'Mobile backend URL not configured' };
     }
     
+    // FIX: Ensure we're sending the already hashed password
+    // The password in facultyData is already hashed by the pre-save hook
     const payload = {
       facultyId: facultyData._id.toString(),
       name: facultyData.faculty_name,
       email: facultyData.email,
       mobileNumber: facultyData.mobile_number,
       username: facultyData.username,
-      password: facultyData.password, // Already hashed
+      password: facultyData.password, // This is already hashed from web
       employeeId: facultyData.employee_id,
       assignedClass: facultyData.assigned_class,
       assignedSection: facultyData.assigned_section,
@@ -31,6 +33,9 @@ const syncToMobileBackend = async (facultyData) => {
       specialization: facultyData.specialization,
       notes: facultyData.notes,
     };
+    
+    console.log(`Syncing faculty ${facultyData.email} to mobile backend`);
+    console.log(`Password hash length: ${facultyData.password?.length || 0}`);
     
     const response = await axios.post(`${mobileBackendUrl}/api/sync/faculty`, payload, {
       headers: {

@@ -213,32 +213,47 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Delete faculty (UPDATED)
+// Delete faculty (UPDATED with proper delete sync)
 router.delete('/:id', async (req, res) => {
   try {
-    const faculty = await Faculty.findByIdAndDelete(req.params.id);
+    const faculty = await Faculty.findById(req.params.id);
     if (!faculty) {
       return res.status(404).json({ message: 'Faculty not found' });
     }
     
-    // Optionally notify mobile backend about deletion
+    const facultyId = faculty._id.toString();
+    const facultyEmail = faculty.email;
+    
+    // Delete from local database
+    await Faculty.findByIdAndDelete(req.params.id);
+    
+    // Notify mobile backend about deletion
     if (process.env.MOBILE_BACKEND_URL) {
       try {
-        await axios.delete(`${process.env.MOBILE_BACKEND_URL}/api/sync/faculty/${faculty._id}`, {
-          headers: { 'X-Sync-Key': process.env.SYNC_SECRET_KEY }
+        const axios = require('axios');
+        const deleteResponse = await axios.delete(`${process.env.MOBILE_BACKEND_URL}/api/sync/faculty/${facultyId}`, {
+          headers: { 
+            'X-Sync-Key': process.env.SYNC_SECRET_KEY 
+          }
         });
+        console.log(`Faculty ${facultyEmail} deleted from mobile:`, deleteResponse.data);
       } catch (syncError) {
         console.error('Failed to notify mobile about deletion:', syncError.message);
+        // Don't fail the request, just log the error
+        // You can add to a retry queue here if needed
       }
     }
     
-    res.json({ message: 'Faculty deleted successfully' });
+    res.json({ 
+      success: true,
+      message: 'Faculty deleted successfully',
+      deletedEmail: facultyEmail
+    });
   } catch (error) {
     console.error('Error deleting faculty:', error);
     res.status(500).json({ message: error.message });
   }
 });
-
 // Update faculty status (UPDATED with re-sync)
 router.patch('/:id/status', async (req, res) => {
   try {
