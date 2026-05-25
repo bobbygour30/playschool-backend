@@ -212,7 +212,44 @@ router.put('/:id', async (req, res) => {
     res.status(400).json({ message: error.message });
   }
 });
-
+// NEW: Force re-sync a specific faculty (for debugging)
+router.post('/:id/force-resync', async (req, res) => {
+  try {
+    const faculty = await Faculty.findById(req.params.id);
+    if (!faculty) {
+      return res.status(404).json({ message: 'Faculty not found' });
+    }
+    
+    // Force sync regardless of status
+    const syncResult = await syncToMobileBackend(faculty);
+    
+    if (syncResult.success) {
+      faculty.sync_status = 'synced';
+      faculty.synced_at = new Date();
+      faculty.sync_error = null;
+      await faculty.save();
+      
+      res.json({ 
+        success: true,
+        message: 'Force sync successful', 
+        sync: syncResult 
+      });
+    } else {
+      faculty.sync_status = 'failed';
+      faculty.sync_error = syncResult.error;
+      faculty.sync_attempts += 1;
+      await faculty.save();
+      
+      res.status(500).json({ 
+        success: false,
+        message: 'Force sync failed', 
+        error: syncResult.error 
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
 // Delete faculty (UPDATED with proper delete sync)
 router.delete('/:id', async (req, res) => {
   try {
