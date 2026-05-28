@@ -19,11 +19,11 @@ const studentSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
-    section: {  // ADD THIS FIELD
+  section: {
     type: String,
     default: 'A',
     uppercase: true,
-    enum: ['A', 'B', 'C', 'D'],  // All sections available for all classes
+    enum: ['A', 'B', 'C', 'D'],
   },
   class_type: {
     type: String,
@@ -31,12 +31,14 @@ const studentSchema = new mongoose.Schema({
     default: 'standard',
   },
   
-  // Staff Assignment (Changed from Faculty to Staff)
+  // Staff Assignment - ONLY Teacher now
   assigned_teacher_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Staff',
     default: null,
   },
+  
+  // REMOVED assigned_staff_id field
   
   // Parent Information
   parent_name: {

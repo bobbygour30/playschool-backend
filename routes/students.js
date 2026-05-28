@@ -9,7 +9,7 @@ router.get('/', async (req, res) => {
   try {
     const students = await Student.find()
       .populate('assigned_teacher_id', 'name designation email phone')
-      .populate('assigned_staff_id', 'name designation email phone')
+      // REMOVED assigned_staff_id populate
       .sort({ created_at: -1 });
     
     // Add class name to each student
@@ -32,8 +32,8 @@ router.get('/class/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
     const students = await Student.find({ class_id: classId })
-      .populate('assigned_teacher_id', 'name designation')
-      .populate('assigned_staff_id', 'name designation');
+      .populate('assigned_teacher_id', 'name designation');
+      // REMOVED assigned_staff_id populate
     
     res.json(students);
   } catch (error) {
@@ -46,8 +46,8 @@ router.get('/class/:classId', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id)
-      .populate('assigned_teacher_id', 'name designation email phone')
-      .populate('assigned_staff_id', 'name designation email phone');
+      .populate('assigned_teacher_id', 'name designation email phone');
+      // REMOVED assigned_staff_id populate
     
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
@@ -68,8 +68,8 @@ router.get('/:id', async (req, res) => {
 router.get('/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
-    const students = await Student.find({ assigned_teacher_id: teacherId })
-      .populate('assigned_staff_id', 'name');
+    const students = await Student.find({ assigned_teacher_id: teacherId });
+      // REMOVED assigned_staff_id populate
     
     res.json(students);
   } catch (error) {
@@ -106,7 +106,7 @@ router.post('/', async (req, res) => {
       gender,
       class_id,
       assigned_teacher_id,
-      assigned_staff_id,
+      // REMOVED assigned_staff_id
       parent_name,
       parent_email,
       parent_phone,
@@ -164,7 +164,7 @@ router.post('/', async (req, res) => {
       class_id: class_id || null,
       class_type: classType,
       assigned_teacher_id: assigned_teacher_id || null,
-      assigned_staff_id: assigned_staff_id || null,
+      // REMOVED assigned_staff_id
       parent_name,
       parent_email,
       parent_phone,
@@ -183,8 +183,8 @@ router.post('/', async (req, res) => {
     const savedStudent = await student.save();
     
     const populatedStudent = await Student.findById(savedStudent._id)
-      .populate('assigned_teacher_id', 'name designation')
-      .populate('assigned_staff_id', 'name designation');
+      .populate('assigned_teacher_id', 'name designation');
+      // REMOVED assigned_staff_id populate
     
     res.status(201).json(populatedStudent);
   } catch (error) {
@@ -209,7 +209,7 @@ router.put('/:id', async (req, res) => {
       gender,
       class_id,
       assigned_teacher_id,
-      assigned_staff_id,
+      // REMOVED assigned_staff_id
       parent_name,
       parent_email,
       parent_phone,
@@ -286,7 +286,7 @@ router.put('/:id', async (req, res) => {
       class_id: class_id || null,
       class_type: classType,
       assigned_teacher_id: assigned_teacher_id || null,
-      assigned_staff_id: assigned_staff_id || null,
+      // REMOVED assigned_staff_id
       parent_name,
       parent_email,
       parent_phone,
@@ -306,8 +306,8 @@ router.put('/:id', async (req, res) => {
       id,
       studentData,
       { new: true, runValidators: true }
-    ).populate('assigned_teacher_id', 'name designation')
-     .populate('assigned_staff_id', 'name designation');
+    ).populate('assigned_teacher_id', 'name designation');
+     // REMOVED assigned_staff_id populate
     
     res.json(student);
   } catch (error) {
