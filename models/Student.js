@@ -37,11 +37,6 @@ const studentSchema = new mongoose.Schema({
     ref: 'Staff',
     default: null,
   },
-  assigned_staff_id: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Staff',
-    default: null,
-  },
   
   // Parent Information
   parent_name: {
