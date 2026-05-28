@@ -19,6 +19,11 @@ const studentSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  section: {  // NEW: Added section field
+    type: String,
+    default: 'A',
+    uppercase: true,
+  },
   class_type: {
     type: String,
     enum: ['standard', 'custom'],
