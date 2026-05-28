@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-05-28T08:26:55.388Z",
+  "summary": {
+    "totalStudents": 1,
+    "totalTeachers": 1,
+    "studentsWithTeacher": 1,
+    "studentsWithoutTeacher": 0,
+    "autoAssignedCount": 0
+  },
+  "teachers": [
+    {
+      "name": "Faculty1",
+      "class": "toddler",
+      "section": "A",
+      "students": 0
+    }
+  ],
+  "orphanStudents": []
+}
