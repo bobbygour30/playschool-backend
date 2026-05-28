@@ -31,14 +31,12 @@ const studentSchema = new mongoose.Schema({
     default: 'standard',
   },
   
-  // Staff Assignment - ONLY Teacher now
+  // Staff Assignment
   assigned_teacher_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Staff',
     default: null,
   },
-  
-  // REMOVED assigned_staff_id field
   
   // Parent Information
   parent_name: {
@@ -95,34 +93,16 @@ const studentSchema = new mongoose.Schema({
     default: null,
   },
   
-  // Documents Storage (Cloudinary URLs)
+  // Documents Storage
   documents: {
-    birth_certificate: {
-      type: String,
-      default: null,
-    },
-    aadhar_card: {
-      type: String,
-      default: null,
-    },
-    parent_aadhar_front: {
-      type: String,
-      default: null,
-    },
-    parent_aadhar_back: {
-      type: String,
-      default: null,
-    },
+    birth_certificate: { type: String, default: null },
+    aadhar_card: { type: String, default: null },
+    parent_aadhar_front: { type: String, default: null },
+    parent_aadhar_back: { type: String, default: null },
   },
   
-  created_at: {
-    type: Date,
-    default: Date.now,
-  },
-  updated_at: {
-    type: Date,
-    default: Date.now,
-  },
+  created_at: { type: Date, default: Date.now },
+  updated_at: { type: Date, default: Date.now },
 });
 
 // Update timestamp on save
