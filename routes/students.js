@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Student = require('../models/Student');
+const Staff = require('../models/Staff');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
@@ -8,7 +9,11 @@ const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudina
 router.get('/', async (req, res) => {
   try {
     const students = await Student.find()
-      .populate('assigned_teacher_id', 'name designation email phone')
+      .populate({
+        path: 'assigned_teacher_id',
+        model: 'Staff',
+        select: 'name designation email phone role department'
+      })
       .sort({ created_at: -1 });
     
     // Add class name to each student
@@ -16,6 +21,14 @@ router.get('/', async (req, res) => {
       const studentObj = student.toObject();
       const classObj = STANDARD_CLASSES[student.class_id];
       studentObj.class_name = classObj || student.class_id || 'N/A';
+      
+      // Ensure teacher data is properly formatted
+      if (studentObj.assigned_teacher_id) {
+        console.log(`Student: ${studentObj.name}, Teacher: ${studentObj.assigned_teacher_id.name}`);
+      } else {
+        console.log(`Student: ${studentObj.name}, No teacher assigned`);
+      }
+      
       return studentObj;
     });
     
@@ -31,7 +44,11 @@ router.get('/class/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
     const students = await Student.find({ class_id: classId })
-      .populate('assigned_teacher_id', 'name designation');
+      .populate({
+        path: 'assigned_teacher_id',
+        model: 'Staff',
+        select: 'name designation'
+      });
     
     res.json(students);
   } catch (error) {
@@ -44,7 +61,11 @@ router.get('/class/:classId', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id)
-      .populate('assigned_teacher_id', 'name designation email phone');
+      .populate({
+        path: 'assigned_teacher_id',
+        model: 'Staff',
+        select: 'name designation email phone role'
+      });
     
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
@@ -65,7 +86,12 @@ router.get('/:id', async (req, res) => {
 router.get('/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
-    const students = await Student.find({ assigned_teacher_id: teacherId });
+    const students = await Student.find({ assigned_teacher_id: teacherId })
+      .populate({
+        path: 'assigned_teacher_id',
+        model: 'Staff',
+        select: 'name'
+      });
     
     res.json(students);
   } catch (error) {
@@ -116,6 +142,18 @@ router.post('/', async (req, res) => {
       status,
       documents,
     } = req.body;
+    
+    console.log('Creating student with teacher_id:', assigned_teacher_id);
+    
+    // Verify teacher exists if provided
+    if (assigned_teacher_id) {
+      const teacherExists = await Staff.findById(assigned_teacher_id);
+      if (!teacherExists) {
+        console.log('Teacher not found with ID:', assigned_teacher_id);
+        return res.status(400).json({ message: 'Selected teacher does not exist' });
+      }
+      console.log('Teacher found:', teacherExists.name, teacherExists.role);
+    }
     
     // Upload documents to Cloudinary if provided
     const uploadedDocuments = {};
@@ -178,9 +216,15 @@ router.post('/', async (req, res) => {
     const student = new Student(studentData);
     const savedStudent = await student.save();
     
-    // IMPORTANT: Populate the teacher data before returning
+    // Populate the teacher data before returning
     const populatedStudent = await Student.findById(savedStudent._id)
-      .populate('assigned_teacher_id', 'name designation email phone');
+      .populate({
+        path: 'assigned_teacher_id',
+        model: 'Staff',
+        select: 'name designation email phone role'
+      });
+    
+    console.log('Saved student with teacher:', populatedStudent.assigned_teacher_id?.name || 'No teacher');
     
     res.status(201).json(populatedStudent);
   } catch (error) {
@@ -220,11 +264,18 @@ router.put('/:id', async (req, res) => {
       documents,
     } = req.body;
     
-    // Handle document updates - delete old files from Cloudinary if replaced
+    // Verify teacher exists if provided
+    if (assigned_teacher_id) {
+      const teacherExists = await Staff.findById(assigned_teacher_id);
+      if (!teacherExists) {
+        return res.status(400).json({ message: 'Selected teacher does not exist' });
+      }
+    }
+    
+    // Handle document updates
     const updatedDocuments = { ...existingStudent.documents };
     
     if (documents) {
-      // Birth Certificate
       if (documents.birth_certificate && documents.birth_certificate !== existingStudent.documents?.birth_certificate) {
         if (existingStudent.documents?.birth_certificate) {
           await deleteFromCloudinary(existingStudent.documents.birth_certificate);
@@ -235,7 +286,6 @@ router.put('/:id', async (req, res) => {
         );
       }
       
-      // Aadhar Card
       if (documents.aadhar_card && documents.aadhar_card !== existingStudent.documents?.aadhar_card) {
         if (existingStudent.documents?.aadhar_card) {
           await deleteFromCloudinary(existingStudent.documents.aadhar_card);
@@ -246,7 +296,6 @@ router.put('/:id', async (req, res) => {
         );
       }
       
-      // Parent Aadhar Front
       if (documents.parent_aadhar_front && documents.parent_aadhar_front !== existingStudent.documents?.parent_aadhar_front) {
         if (existingStudent.documents?.parent_aadhar_front) {
           await deleteFromCloudinary(existingStudent.documents.parent_aadhar_front);
@@ -257,7 +306,6 @@ router.put('/:id', async (req, res) => {
         );
       }
       
-      // Parent Aadhar Back
       if (documents.parent_aadhar_back && documents.parent_aadhar_back !== existingStudent.documents?.parent_aadhar_back) {
         if (existingStudent.documents?.parent_aadhar_back) {
           await deleteFromCloudinary(existingStudent.documents.parent_aadhar_back);
@@ -302,7 +350,11 @@ router.put('/:id', async (req, res) => {
       id,
       studentData,
       { new: true, runValidators: true }
-    ).populate('assigned_teacher_id', 'name designation email phone');
+    ).populate({
+      path: 'assigned_teacher_id',
+      model: 'Staff',
+      select: 'name designation email phone role'
+    });
     
     res.json(student);
   } catch (error) {
