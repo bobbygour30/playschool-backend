@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const axios = require('axios');
 const Student = require('../models/Student');
 const Staff = require('../models/Staff');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
@@ -16,7 +17,60 @@ const toObjectId = (id) => {
   }
 };
 
-// Get all students with populated references
+// Helper function to sync student to mobile backend
+const syncStudentToMobile = async (studentData, isDelete = false) => {
+  if (!process.env.MOBILE_BACKEND_URL) {
+    console.log('MOBILE_BACKEND_URL not configured, skipping sync');
+    return { success: false, error: 'Mobile backend URL not configured' };
+  }
+
+  try {
+    if (isDelete) {
+      // Delete student from mobile
+      const response = await axios.delete(
+        `${process.env.MOBILE_BACKEND_URL}/api/sync/student/${studentData._id}`,
+        {
+          headers: {
+            'X-Sync-Key': process.env.SYNC_SECRET_KEY
+          }
+        }
+      );
+      return { success: true, data: response.data };
+    } else {
+      // Create/Update student in mobile
+      const payload = {
+        name: studentData.name,
+        rollNumber: studentData.rollNumber,
+        class_id: studentData.class_id,
+        section: studentData.section || 'A',
+        parent_name: studentData.parent_name,
+        parent_phone: studentData.parent_phone,
+        parent_email: studentData.parent_email,
+        date_of_birth: studentData.date_of_birth,
+        gender: studentData.gender,
+        address: studentData.address,
+        status: studentData.status,
+      };
+      
+      const response = await axios.post(
+        `${process.env.MOBILE_BACKEND_URL}/api/sync/student`,
+        payload,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Sync-Key': process.env.SYNC_SECRET_KEY
+          }
+        }
+      );
+      return { success: true, data: response.data };
+    }
+  } catch (error) {
+    console.error('Sync to mobile error:', error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+// ==================== GET ALL STUDENTS ====================
 router.get('/', async (req, res) => {
   try {
     const students = await Student.find()
@@ -42,7 +96,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get students by class
+// ==================== GET STUDENTS BY CLASS ====================
 router.get('/class/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
@@ -60,7 +114,7 @@ router.get('/class/:classId', async (req, res) => {
   }
 });
 
-// Get student by ID
+// ==================== GET STUDENT BY ID ====================
 router.get('/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id)
@@ -85,12 +139,11 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Get students by teacher - FIXED to handle both ObjectId and string
+// ==================== GET STUDENTS BY TEACHER ====================
 router.get('/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
     
-    // Try multiple formats to find students assigned to this teacher
     const students = await Student.find({ 
       $or: [
         { assigned_teacher_id: teacherId },
@@ -109,7 +162,7 @@ router.get('/teacher/:teacherId', async (req, res) => {
   }
 });
 
-// Get class-wise statistics
+// ==================== GET CLASS-WISE STATISTICS ====================
 router.get('/stats/class-wise', async (req, res) => {
   try {
     const classes = ['toddler', 'pre-nursery', 'nursery', 'kg-1'];
@@ -128,7 +181,7 @@ router.get('/stats/class-wise', async (req, res) => {
   }
 });
 
-// Create student with document upload to Cloudinary
+// ==================== CREATE STUDENT ====================
 router.post('/', async (req, res) => {
   try {
     const {
@@ -221,6 +274,9 @@ router.post('/', async (req, res) => {
     const student = new Student(studentData);
     const savedStudent = await student.save();
     
+    // Sync to mobile backend
+    const syncResult = await syncStudentToMobile(savedStudent);
+    
     // Populate the teacher data before returning
     const populatedStudent = await Student.findById(savedStudent._id)
       .populate({
@@ -229,14 +285,17 @@ router.post('/', async (req, res) => {
         select: 'name designation email phone role'
       });
     
-    res.status(201).json(populatedStudent);
+    const responseData = populatedStudent.toObject();
+    responseData.sync = syncResult;
+    
+    res.status(201).json(responseData);
   } catch (error) {
     console.error('Error creating student:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// Update student with document management
+// ==================== UPDATE STUDENT ====================
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -359,14 +418,20 @@ router.put('/:id', async (req, res) => {
       select: 'name designation email phone role'
     });
     
-    res.json(student);
+    // Sync to mobile backend
+    const syncResult = await syncStudentToMobile(student);
+    
+    const responseData = student.toObject();
+    responseData.sync = syncResult;
+    
+    res.json(responseData);
   } catch (error) {
     console.error('Error updating student:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// Delete student and associated documents
+// ==================== DELETE STUDENT ====================
 router.delete('/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id);
@@ -391,11 +456,99 @@ router.delete('/:id', async (req, res) => {
       }
     }
     
+    // Sync deletion to mobile backend
+    await syncStudentToMobile(student, true);
+    
     await Student.findByIdAndDelete(req.params.id);
     res.json({ message: 'Student deleted successfully' });
   } catch (error) {
     console.error('Error deleting student:', error);
     res.status(500).json({ message: error.message });
+  }
+});
+
+// ==================== SYNC ALL STUDENTS TO MOBILE ====================
+router.post('/sync-to-mobile', async (req, res) => {
+  try {
+    const students = await Student.find();
+    
+    console.log(`📤 Syncing ${students.length} students to mobile backend...`);
+    
+    // Format students for mobile sync
+    const studentsForSync = students.map(student => ({
+      name: student.name,
+      rollNumber: student.rollNumber,
+      class_id: student.class_id,
+      section: student.section || 'A',
+      parent_name: student.parent_name,
+      parent_phone: student.parent_phone,
+      parent_email: student.parent_email,
+      date_of_birth: student.date_of_birth,
+      gender: student.gender,
+      address: student.address,
+      status: student.status,
+    }));
+    
+    // Check if mobile backend URL is configured
+    if (!process.env.MOBILE_BACKEND_URL) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'MOBILE_BACKEND_URL not configured in environment variables' 
+      });
+    }
+    
+    // Call mobile backend sync endpoint
+    const response = await axios.post(
+      `${process.env.MOBILE_BACKEND_URL}/api/sync/students`,
+      { students: studentsForSync },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Sync-Key': process.env.SYNC_SECRET_KEY
+        },
+        timeout: 30000
+      }
+    );
+    
+    console.log(`✅ Sync completed: ${response.data.created} created, ${response.data.updated} updated`);
+    
+    res.json({
+      success: true,
+      message: `Successfully synced ${students.length} students to mobile`,
+      syncResult: response.data
+    });
+  } catch (error) {
+    console.error('Sync to mobile error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to sync students to mobile',
+      error: error.message 
+    });
+  }
+});
+
+// ==================== SYNC SINGLE STUDENT TO MOBILE ====================
+router.post('/:id/sync-to-mobile', async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    
+    const syncResult = await syncStudentToMobile(student);
+    
+    res.json({
+      success: true,
+      message: `Student ${student.name} synced successfully`,
+      syncResult: syncResult
+    });
+  } catch (error) {
+    console.error('Sync single student error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
   }
 });
 
