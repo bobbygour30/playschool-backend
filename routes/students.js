@@ -1,9 +1,20 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Student = require('../models/Student');
 const Staff = require('../models/Staff');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
+
+// Helper function to convert to ObjectId safely
+const toObjectId = (id) => {
+  if (!id) return null;
+  try {
+    return new mongoose.Types.ObjectId(id);
+  } catch (error) {
+    return id;
+  }
+};
 
 // Get all students with populated references
 router.get('/', async (req, res) => {
@@ -21,14 +32,6 @@ router.get('/', async (req, res) => {
       const studentObj = student.toObject();
       const classObj = STANDARD_CLASSES[student.class_id];
       studentObj.class_name = classObj || student.class_id || 'N/A';
-      
-      // Ensure teacher data is properly formatted
-      if (studentObj.assigned_teacher_id) {
-        console.log(`Student: ${studentObj.name}, Teacher: ${studentObj.assigned_teacher_id.name}`);
-      } else {
-        console.log(`Student: ${studentObj.name}, No teacher assigned`);
-      }
-      
       return studentObj;
     });
     
@@ -82,16 +85,22 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Get students by teacher
+// Get students by teacher - FIXED to handle both ObjectId and string
 router.get('/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
-    const students = await Student.find({ assigned_teacher_id: teacherId })
-      .populate({
-        path: 'assigned_teacher_id',
-        model: 'Staff',
-        select: 'name'
-      });
+    
+    // Try multiple formats to find students assigned to this teacher
+    const students = await Student.find({ 
+      $or: [
+        { assigned_teacher_id: teacherId },
+        { assigned_teacher_id: toObjectId(teacherId) }
+      ]
+    }).populate({
+      path: 'assigned_teacher_id',
+      model: 'Staff',
+      select: 'name designation email phone role'
+    });
     
     res.json(students);
   } catch (error) {
@@ -143,16 +152,12 @@ router.post('/', async (req, res) => {
       documents,
     } = req.body;
     
-    console.log('Creating student with teacher_id:', assigned_teacher_id);
-    
     // Verify teacher exists if provided
     if (assigned_teacher_id) {
       const teacherExists = await Staff.findById(assigned_teacher_id);
       if (!teacherExists) {
-        console.log('Teacher not found with ID:', assigned_teacher_id);
         return res.status(400).json({ message: 'Selected teacher does not exist' });
       }
-      console.log('Teacher found:', teacherExists.name, teacherExists.role);
     }
     
     // Upload documents to Cloudinary if provided
@@ -223,8 +228,6 @@ router.post('/', async (req, res) => {
         model: 'Staff',
         select: 'name designation email phone role'
       });
-    
-    console.log('Saved student with teacher:', populatedStudent.assigned_teacher_id?.name || 'No teacher');
     
     res.status(201).json(populatedStudent);
   } catch (error) {

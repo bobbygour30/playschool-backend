@@ -91,7 +91,7 @@ router.post('/', async (req, res) => {
       experience_years: experience_years || 0,
       specialization: specialization || '',
       notes: notes || '',
-      sync_status: 'pending', // New faculty starts as pending sync
+      sync_status: 'pending',
     });
     
     const savedFaculty = await faculty.save();
@@ -126,7 +126,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Update faculty (UPDATED with re-sync)
+// Update faculty
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -172,10 +172,9 @@ router.put('/:id', async (req, res) => {
       specialization: specialization || '',
       notes: notes || '',
       updated_at: Date.now(),
-      sync_status: 'pending', // Mark for re-sync
+      sync_status: 'pending',
     };
     
-    // Only update password if provided
     if (password && password !== existingFaculty.password) {
       const salt = await bcrypt.genSalt(10);
       updateData.password = await bcrypt.hash(password, salt);
@@ -183,7 +182,6 @@ router.put('/:id', async (req, res) => {
     
     const faculty = await Faculty.findByIdAndUpdate(id, updateData, { new: true });
     
-    // Re-sync to mobile backend
     let syncResult = null;
     if (process.env.MOBILE_BACKEND_URL) {
       syncResult = await syncToMobileBackend(faculty);
@@ -212,7 +210,8 @@ router.put('/:id', async (req, res) => {
     res.status(400).json({ message: error.message });
   }
 });
-// NEW: Force re-sync a specific faculty (for debugging)
+
+// Force re-sync
 router.post('/:id/force-resync', async (req, res) => {
   try {
     const faculty = await Faculty.findById(req.params.id);
@@ -220,7 +219,6 @@ router.post('/:id/force-resync', async (req, res) => {
       return res.status(404).json({ message: 'Faculty not found' });
     }
     
-    // Force sync regardless of status
     const syncResult = await syncToMobileBackend(faculty);
     
     if (syncResult.success) {
@@ -250,7 +248,8 @@ router.post('/:id/force-resync', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
-// Delete faculty (UPDATED with proper delete sync)
+
+// Delete faculty
 router.delete('/:id', async (req, res) => {
   try {
     const faculty = await Faculty.findById(req.params.id);
@@ -261,23 +260,17 @@ router.delete('/:id', async (req, res) => {
     const facultyId = faculty._id.toString();
     const facultyEmail = faculty.email;
     
-    // Delete from local database
     await Faculty.findByIdAndDelete(req.params.id);
     
-    // Notify mobile backend about deletion
     if (process.env.MOBILE_BACKEND_URL) {
       try {
         const axios = require('axios');
-        const deleteResponse = await axios.delete(`${process.env.MOBILE_BACKEND_URL}/api/sync/faculty/${facultyId}`, {
-          headers: { 
-            'X-Sync-Key': process.env.SYNC_SECRET_KEY 
-          }
+        await axios.delete(`${process.env.MOBILE_BACKEND_URL}/api/sync/faculty/${facultyId}`, {
+          headers: { 'X-Sync-Key': process.env.SYNC_SECRET_KEY }
         });
-        console.log(`Faculty ${facultyEmail} deleted from mobile:`, deleteResponse.data);
+        console.log(`Faculty ${facultyEmail} deleted from mobile`);
       } catch (syncError) {
         console.error('Failed to notify mobile about deletion:', syncError.message);
-        // Don't fail the request, just log the error
-        // You can add to a retry queue here if needed
       }
     }
     
@@ -291,7 +284,8 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
-// Update faculty status (UPDATED with re-sync)
+
+// Update faculty status
 router.patch('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
@@ -311,7 +305,6 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(404).json({ message: 'Faculty not found' });
     }
     
-    // Re-sync to mobile backend
     let syncResult = null;
     if (process.env.MOBILE_BACKEND_URL) {
       syncResult = await syncToMobileBackend(faculty);
@@ -366,7 +359,7 @@ router.get('/stats/overview', async (req, res) => {
   }
 });
 
-// NEW: Retry failed sync for a specific faculty
+// Retry failed sync
 router.post('/:id/retry-sync', async (req, res) => {
   try {
     const faculty = await Faculty.findById(req.params.id);
@@ -382,38 +375,28 @@ router.post('/:id/retry-sync', async (req, res) => {
       faculty.sync_error = null;
       await faculty.save();
       
-      res.json({ 
-        message: 'Sync retry successful', 
-        sync: syncResult 
-      });
+      res.json({ message: 'Sync retry successful', sync: syncResult });
     } else {
       faculty.sync_status = 'failed';
       faculty.sync_error = syncResult.error;
       faculty.sync_attempts += 1;
       await faculty.save();
       
-      res.status(500).json({ 
-        message: 'Sync retry failed', 
-        error: syncResult.error 
-      });
+      res.status(500).json({ message: 'Sync retry failed', error: syncResult.error });
     }
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// NEW: Bulk sync all pending/failed faculty
+// Bulk sync
 router.post('/bulk-sync', async (req, res) => {
   try {
     const pendingFaculty = await Faculty.find({ 
       sync_status: { $in: ['pending', 'failed'] } 
     });
     
-    const results = {
-      total: pendingFaculty.length,
-      success: [],
-      failed: [],
-    };
+    const results = { total: pendingFaculty.length, success: [], failed: [] };
     
     for (const faculty of pendingFaculty) {
       const syncResult = await syncToMobileBackend(faculty);
@@ -429,20 +412,16 @@ router.post('/bulk-sync', async (req, res) => {
         faculty.sync_attempts += 1;
         results.failed.push({ email: faculty.email, error: syncResult.error });
       }
-      
       await faculty.save();
     }
     
-    res.json({
-      message: 'Bulk sync completed',
-      results
-    });
+    res.json({ message: 'Bulk sync completed', results });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// NEW: Get sync status for dashboard
+// Get sync status
 router.get('/sync/status', async (req, res) => {
   try {
     const total = await Faculty.countDocuments();
