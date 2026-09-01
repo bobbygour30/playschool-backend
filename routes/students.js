@@ -1,3 +1,4 @@
+// routes/students.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -50,6 +51,12 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         gender: studentData.gender,
         address: studentData.address,
         status: studentData.status,
+        fee_amount: studentData.fee_amount || 0,
+        kit_charges: studentData.kit_charges || 0,
+        total_amount: studentData.total_amount || 0,
+        fee_paid: studentData.fee_paid || false,
+        payment_date: studentData.payment_date || null,
+        payment_mode: studentData.payment_mode || 'Cash',
       };
       
       const response = await axios.post(
@@ -181,6 +188,44 @@ router.get('/stats/class-wise', async (req, res) => {
   }
 });
 
+// ==================== GET FEE STATISTICS ====================
+router.get('/stats/fee-summary', async (req, res) => {
+  try {
+    const totalStudents = await Student.countDocuments();
+    const paidStudents = await Student.countDocuments({ fee_paid: true });
+    const unpaidStudents = await Student.countDocuments({ fee_paid: false });
+    
+    const feeResult = await Student.aggregate([
+      { $group: {
+        _id: null,
+        totalFeeAmount: { $sum: '$fee_amount' },
+        totalKitCharges: { $sum: '$kit_charges' },
+        totalAmount: { $sum: '$total_amount' },
+        paidAmount: { $sum: { $cond: ['$fee_paid', '$total_amount', 0] } },
+        unpaidAmount: { $sum: { $cond: ['$fee_paid', 0, '$total_amount'] } }
+      }}
+    ]);
+    
+    const stats = feeResult[0] || {
+      totalFeeAmount: 0,
+      totalKitCharges: 0,
+      totalAmount: 0,
+      paidAmount: 0,
+      unpaidAmount: 0
+    };
+    
+    res.json({
+      totalStudents,
+      paidStudents,
+      unpaidStudents,
+      ...stats
+    });
+  } catch (error) {
+    console.error('Error fetching fee summary:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // ==================== CREATE STUDENT ====================
 router.post('/', async (req, res) => {
   try {
@@ -203,6 +248,11 @@ router.post('/', async (req, res) => {
       vehicle_id,
       status,
       documents,
+      fee_amount,
+      kit_charges,
+      fee_paid,
+      payment_date,
+      payment_mode,
     } = req.body;
     
     // Verify teacher exists if provided
@@ -249,6 +299,11 @@ router.post('/', async (req, res) => {
       classType = 'custom';
     }
     
+    // Calculate total amount
+    const feeAmount = parseFloat(fee_amount) || 0;
+    const kitCharges = parseFloat(kit_charges) || 0;
+    const totalAmount = feeAmount + kitCharges;
+    
     const studentData = {
       name,
       date_of_birth: new Date(date_of_birth),
@@ -269,6 +324,12 @@ router.post('/', async (req, res) => {
       vehicle_id: transport_type === 'Cab' ? vehicle_id : null,
       status: status || 'Active',
       documents: uploadedDocuments,
+      fee_amount: feeAmount,
+      kit_charges: kitCharges,
+      total_amount: totalAmount,
+      fee_paid: fee_paid || false,
+      payment_date: payment_date ? new Date(payment_date) : null,
+      payment_mode: payment_mode || 'Cash',
     };
     
     const student = new Student(studentData);
@@ -324,6 +385,11 @@ router.put('/:id', async (req, res) => {
       vehicle_id,
       status,
       documents,
+      fee_amount,
+      kit_charges,
+      fee_paid,
+      payment_date,
+      payment_mode,
     } = req.body;
     
     // Verify teacher exists if provided
@@ -385,6 +451,11 @@ router.put('/:id', async (req, res) => {
       classType = 'custom';
     }
     
+    // Calculate total amount
+    const feeAmount = parseFloat(fee_amount) !== undefined ? parseFloat(fee_amount) : existingStudent.fee_amount || 0;
+    const kitCharges = parseFloat(kit_charges) !== undefined ? parseFloat(kit_charges) : existingStudent.kit_charges || 0;
+    const totalAmount = feeAmount + kitCharges;
+    
     const studentData = {
       name,
       date_of_birth: new Date(date_of_birth),
@@ -405,6 +476,12 @@ router.put('/:id', async (req, res) => {
       vehicle_id: transport_type === 'Cab' ? vehicle_id : null,
       status: status || 'Active',
       documents: updatedDocuments,
+      fee_amount: feeAmount,
+      kit_charges: kitCharges,
+      total_amount: totalAmount,
+      fee_paid: fee_paid !== undefined ? fee_paid : existingStudent.fee_paid,
+      payment_date: payment_date ? new Date(payment_date) : existingStudent.payment_date,
+      payment_mode: payment_mode || existingStudent.payment_mode || 'Cash',
       updated_at: Date.now(),
     };
     
@@ -427,6 +504,41 @@ router.put('/:id', async (req, res) => {
     res.json(responseData);
   } catch (error) {
     console.error('Error updating student:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// ==================== UPDATE STUDENT FEE STATUS ====================
+router.patch('/:id/fee', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { fee_paid, payment_date, payment_mode } = req.body;
+    
+    const student = await Student.findById(id);
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    
+    student.fee_paid = fee_paid !== undefined ? fee_paid : student.fee_paid;
+    if (fee_paid) {
+      student.payment_date = payment_date ? new Date(payment_date) : new Date();
+    } else {
+      student.payment_date = null;
+    }
+    student.payment_mode = payment_mode || student.payment_mode || 'Cash';
+    student.updated_at = Date.now();
+    
+    await student.save();
+    
+    // Sync to mobile backend
+    const syncResult = await syncStudentToMobile(student);
+    
+    const responseData = student.toObject();
+    responseData.sync = syncResult;
+    
+    res.json(responseData);
+  } catch (error) {
+    console.error('Error updating fee status:', error);
     res.status(400).json({ message: error.message });
   }
 });
@@ -487,6 +599,12 @@ router.post('/sync-to-mobile', async (req, res) => {
       gender: student.gender,
       address: student.address,
       status: student.status,
+      fee_amount: student.fee_amount || 0,
+      kit_charges: student.kit_charges || 0,
+      total_amount: student.total_amount || 0,
+      fee_paid: student.fee_paid || false,
+      payment_date: student.payment_date || null,
+      payment_mode: student.payment_mode || 'Cash',
     }));
     
     // Check if mobile backend URL is configured

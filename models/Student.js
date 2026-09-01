@@ -1,3 +1,4 @@
+// models/Student.js
 const mongoose = require('mongoose');
 
 const studentSchema = new mongoose.Schema({
@@ -81,6 +82,33 @@ const studentSchema = new mongoose.Schema({
     default: 'Active',
   },
   
+  // Fee and Charges Information
+  fee_amount: {
+    type: Number,
+    default: 0,
+  },
+  kit_charges: {
+    type: Number,
+    default: 0,
+  },
+  total_amount: {
+    type: Number,
+    default: 0,
+  },
+  fee_paid: {
+    type: Boolean,
+    default: false,
+  },
+  payment_date: {
+    type: Date,
+    default: null,
+  },
+  payment_mode: {
+    type: String,
+    enum: ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Cheque'],
+    default: 'Cash',
+  },
+  
   // Transport Information
   transport_type: {
     type: String,
@@ -108,6 +136,21 @@ const studentSchema = new mongoose.Schema({
 // Update timestamp on save
 studentSchema.pre('save', function(next) {
   this.updated_at = Date.now();
+  // Auto-calculate total amount
+  if (this.fee_amount !== undefined || this.kit_charges !== undefined) {
+    this.total_amount = (this.fee_amount || 0) + (this.kit_charges || 0);
+  }
+  next();
+});
+
+// Pre-update middleware to calculate total
+studentSchema.pre('findOneAndUpdate', function(next) {
+  const update = this.getUpdate();
+  if (update.fee_amount !== undefined || update.kit_charges !== undefined) {
+    const fee = update.fee_amount || 0;
+    const kit = update.kit_charges || 0;
+    update.total_amount = fee + kit;
+  }
   next();
 });
 
