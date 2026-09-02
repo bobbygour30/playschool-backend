@@ -9,9 +9,16 @@ dotenv.config();
 const app = express();
 
 // Middleware
-app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Increased limit for base64 document uploads
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(cors({
+  origin: '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+}));
+
+// IMPORTANT: Increase payload size limit for file uploads (base64 images/documents)
+app.use(express.json({ limit: '100mb' })); // Increased for large file uploads
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // API Status Check Endpoint
 app.get('/api/status', (req, res) => {
@@ -185,6 +192,7 @@ if (process.env.NODE_ENV !== 'production') {
 ║  🌍 Environment:     ${process.env.NODE_ENV || 'development'}                                    ║
 ║  🗄️  MongoDB:         Connected ✅                                             ║
 ║  ☁️  Cloudinary:      ${process.env.CLOUDINARY_CLOUD_NAME ? 'Configured ✅' : 'Not Configured ⚠️'}   ║
+║  📦 Payload Limit:   100MB (for file uploads)                                ║
 ║                                                                               ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
       `);

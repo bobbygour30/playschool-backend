@@ -17,13 +17,18 @@ const uploadToCloudinary = async (file, folder) => {
       return file;
     }
     
-    // Upload base64 string directly
-    const result = await cloudinary.uploader.upload(file, {
-      folder: `playschool/${folder}`,
-      resource_type: 'auto',
-    });
+    // Check if it's a data URL (base64)
+    if (typeof file === 'string' && file.startsWith('data:')) {
+      // Upload base64 string directly
+      const result = await cloudinary.uploader.upload(file, {
+        folder: `playschool/${folder}`,
+        resource_type: 'auto',
+      });
+      
+      return result.secure_url;
+    }
     
-    return result.secure_url;
+    return null;
   } catch (error) {
     console.error('Cloudinary upload error:', error);
     return null;
@@ -37,9 +42,13 @@ const deleteFromCloudinary = async (url) => {
     
     // Extract public ID from URL
     const parts = url.split('/');
-    const filename = parts.pop().split('.')[0];
-    const folder = parts.slice(-2).join('/');
-    const publicId = `${folder}/${filename}`;
+    // Find the part after 'upload/' and remove version if present
+    const uploadIndex = parts.findIndex(p => p === 'upload');
+    if (uploadIndex === -1) return;
+    
+    let publicId = parts.slice(uploadIndex + 1).join('/');
+    // Remove file extension
+    publicId = publicId.replace(/\.[^/.]+$/, '');
     
     await cloudinary.uploader.destroy(publicId);
     console.log(`Deleted from Cloudinary: ${publicId}`);

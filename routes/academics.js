@@ -94,6 +94,7 @@ router.post('/documents', async (req, res) => {
       file,
       file_name,
       file_type,
+      file_size,
       uploaded_by,
     } = req.body;
     
@@ -114,6 +115,7 @@ router.post('/documents', async (req, res) => {
       description: description || '',
       file_name,
       file_type,
+      file_size: file_size ? file_size.toString() : '',
       file_url: uploadedFileUrl,
       uploaded_by: uploaded_by || null,
     });
@@ -145,6 +147,7 @@ router.put('/document/:id', async (req, res) => {
       file,
       file_name,
       file_type,
+      file_size,
     } = req.body;
     
     // Handle file update
@@ -163,6 +166,7 @@ router.put('/document/:id', async (req, res) => {
       description: description || '',
       file_name: file_name || existingDocument.file_name,
       file_type: file_type || existingDocument.file_type,
+      file_size: file_size ? file_size.toString() : existingDocument.file_size,
       file_url: uploadedFileUrl,
       updated_at: Date.now(),
     };
@@ -333,22 +337,31 @@ router.put('/assessment/:id', async (req, res) => {
     } = req.body;
     
     // Handle attachment updates
-    let uploadedAttachments = existingAssessment.attachments || [];
+    let uploadedAttachments = [];
     
+    // If new attachments are provided, upload them
     if (attachments && attachments.length > 0) {
-      // Delete old attachments if they are being replaced
-      for (const oldAttachment of existingAssessment.attachments) {
+      // Delete old attachments
+      for (const oldAttachment of existingAssessment.attachments || []) {
         await deleteFromCloudinary(oldAttachment);
       }
       
       // Upload new attachments
-      uploadedAttachments = [];
       for (const attachment of attachments) {
-        const uploadedUrl = await uploadToCloudinary(attachment, 'academics/assessments');
-        if (uploadedUrl) {
-          uploadedAttachments.push(uploadedUrl);
+        // Only upload if it's a base64 string (new file)
+        if (attachment && typeof attachment === 'string' && !attachment.startsWith('http')) {
+          const uploadedUrl = await uploadToCloudinary(attachment, 'academics/assessments');
+          if (uploadedUrl) {
+            uploadedAttachments.push(uploadedUrl);
+          }
+        } else if (attachment && typeof attachment === 'string' && attachment.startsWith('http')) {
+          // Keep existing URL
+          uploadedAttachments.push(attachment);
         }
       }
+    } else {
+      // If no attachments provided, keep existing ones
+      uploadedAttachments = existingAssessment.attachments || [];
     }
     
     const assessmentData = {
@@ -385,7 +398,7 @@ router.delete('/assessment/:id', async (req, res) => {
     }
     
     // Delete attachments from Cloudinary
-    for (const attachment of assessment.attachments) {
+    for (const attachment of assessment.attachments || []) {
       await deleteFromCloudinary(attachment);
     }
     
@@ -510,22 +523,27 @@ router.put('/event/:id', async (req, res) => {
     } = req.body;
     
     // Handle attachment updates
-    let uploadedAttachments = existingEvent.attachments || [];
+    let uploadedAttachments = [];
     
     if (attachments && attachments.length > 0) {
-      // Delete old attachments if they are being replaced
-      for (const oldAttachment of existingEvent.attachments) {
+      // Delete old attachments
+      for (const oldAttachment of existingEvent.attachments || []) {
         await deleteFromCloudinary(oldAttachment);
       }
       
       // Upload new attachments
-      uploadedAttachments = [];
       for (const attachment of attachments) {
-        const uploadedUrl = await uploadToCloudinary(attachment, 'academics/events');
-        if (uploadedUrl) {
-          uploadedAttachments.push(uploadedUrl);
+        if (attachment && typeof attachment === 'string' && !attachment.startsWith('http')) {
+          const uploadedUrl = await uploadToCloudinary(attachment, 'academics/events');
+          if (uploadedUrl) {
+            uploadedAttachments.push(uploadedUrl);
+          }
+        } else if (attachment && typeof attachment === 'string' && attachment.startsWith('http')) {
+          uploadedAttachments.push(attachment);
         }
       }
+    } else {
+      uploadedAttachments = existingEvent.attachments || [];
     }
     
     const eventData = {
@@ -534,7 +552,7 @@ router.put('/event/:id', async (req, res) => {
       type,
       status,
       description,
-      venue,
+      venue: venue || '',
       attachments: uploadedAttachments,
       updated_at: Date.now(),
     };
@@ -562,7 +580,7 @@ router.delete('/event/:id', async (req, res) => {
     }
     
     // Delete attachments from Cloudinary
-    for (const attachment of event.attachments) {
+    for (const attachment of event.attachments || []) {
       await deleteFromCloudinary(attachment);
     }
     
@@ -684,22 +702,27 @@ router.put('/culmination/:id', async (req, res) => {
     } = req.body;
     
     // Handle attachment updates
-    let uploadedAttachments = existingCulmination.attachments || [];
+    let uploadedAttachments = [];
     
     if (attachments && attachments.length > 0) {
-      // Delete old attachments if they are being replaced
-      for (const oldAttachment of existingCulmination.attachments) {
+      // Delete old attachments
+      for (const oldAttachment of existingCulmination.attachments || []) {
         await deleteFromCloudinary(oldAttachment);
       }
       
       // Upload new attachments
-      uploadedAttachments = [];
       for (const attachment of attachments) {
-        const uploadedUrl = await uploadToCloudinary(attachment, 'academics/culminations');
-        if (uploadedUrl) {
-          uploadedAttachments.push(uploadedUrl);
+        if (attachment && typeof attachment === 'string' && !attachment.startsWith('http')) {
+          const uploadedUrl = await uploadToCloudinary(attachment, 'academics/culminations');
+          if (uploadedUrl) {
+            uploadedAttachments.push(uploadedUrl);
+          }
+        } else if (attachment && typeof attachment === 'string' && attachment.startsWith('http')) {
+          uploadedAttachments.push(attachment);
         }
       }
+    } else {
+      uploadedAttachments = existingCulmination.attachments || [];
     }
     
     const culminationData = {
@@ -707,7 +730,7 @@ router.put('/culmination/:id', async (req, res) => {
       date: new Date(date),
       status,
       description,
-      report,
+      report: report || '',
       attachments: uploadedAttachments,
       updated_at: Date.now(),
     };
@@ -735,7 +758,7 @@ router.delete('/culmination/:id', async (req, res) => {
     }
     
     // Delete attachments from Cloudinary
-    for (const attachment of culmination.attachments) {
+    for (const attachment of culmination.attachments || []) {
       await deleteFromCloudinary(attachment);
     }
     
