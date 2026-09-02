@@ -49,6 +49,11 @@ const studentSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  parent_relationship: {
+    type: String,
+    enum: ['Mother', 'Father', 'Guardian'],
+    default: 'Mother',
+  },
   parent_email: {
     type: String,
     required: true,
