@@ -27,7 +27,6 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
 
   try {
     if (isDelete) {
-      // Delete student from mobile
       const response = await axios.delete(
         `${process.env.MOBILE_BACKEND_URL}/api/sync/student/${studentData._id}`,
         {
@@ -38,7 +37,6 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
       );
       return { success: true, data: response.data };
     } else {
-      // Create/Update student in mobile
       const payload = {
         name: studentData.name,
         rollNumber: studentData.rollNumber,
@@ -49,10 +47,16 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         parent_email: studentData.parent_email,
         date_of_birth: studentData.date_of_birth,
         gender: studentData.gender,
+        blood_group: studentData.blood_group,
         address: studentData.address,
         status: studentData.status,
-        fee_amount: studentData.fee_amount || 0,
-        kit_charges: studentData.kit_charges || 0,
+        registration_fee: studentData.registration_fee || 0,
+        admission_fee: studentData.admission_fee || 0,
+        tuition_fee: studentData.tuition_fee || 0,
+        activity_fee: studentData.activity_fee || 0,
+        kit_fee: studentData.kit_fee || 0,
+        cab_fee: studentData.cab_fee || 0,
+        camera_fee: studentData.camera_fee || 0,
         total_amount: studentData.total_amount || 0,
         fee_paid: studentData.fee_paid || false,
         payment_date: studentData.payment_date || null,
@@ -88,7 +92,6 @@ router.get('/', async (req, res) => {
       })
       .sort({ created_at: -1 });
     
-    // Add class name to each student
     const studentsWithClass = students.map(student => {
       const studentObj = student.toObject();
       const classObj = STANDARD_CLASSES[student.class_id];
@@ -198,8 +201,13 @@ router.get('/stats/fee-summary', async (req, res) => {
     const feeResult = await Student.aggregate([
       { $group: {
         _id: null,
-        totalFeeAmount: { $sum: '$fee_amount' },
-        totalKitCharges: { $sum: '$kit_charges' },
+        totalRegistrationFee: { $sum: '$registration_fee' },
+        totalAdmissionFee: { $sum: '$admission_fee' },
+        totalTuitionFee: { $sum: '$tuition_fee' },
+        totalActivityFee: { $sum: '$activity_fee' },
+        totalKitFee: { $sum: '$kit_fee' },
+        totalCabFee: { $sum: '$cab_fee' },
+        totalCameraFee: { $sum: '$camera_fee' },
         totalAmount: { $sum: '$total_amount' },
         paidAmount: { $sum: { $cond: ['$fee_paid', '$total_amount', 0] } },
         unpaidAmount: { $sum: { $cond: ['$fee_paid', 0, '$total_amount'] } }
@@ -207,8 +215,13 @@ router.get('/stats/fee-summary', async (req, res) => {
     ]);
     
     const stats = feeResult[0] || {
-      totalFeeAmount: 0,
-      totalKitCharges: 0,
+      totalRegistrationFee: 0,
+      totalAdmissionFee: 0,
+      totalTuitionFee: 0,
+      totalActivityFee: 0,
+      totalKitFee: 0,
+      totalCabFee: 0,
+      totalCameraFee: 0,
       totalAmount: 0,
       paidAmount: 0,
       unpaidAmount: 0
@@ -226,6 +239,35 @@ router.get('/stats/fee-summary', async (req, res) => {
   }
 });
 
+// ==================== GET FEE BREAKDOWN BY STUDENT ====================
+router.get('/fee-breakdown/:id', async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    
+    res.json({
+      student_name: student.name,
+      registration_fee: student.registration_fee || 0,
+      admission_fee: student.admission_fee || 0,
+      tuition_fee: student.tuition_fee || 0,
+      activity_fee: student.activity_fee || 0,
+      kit_fee: student.kit_fee || 0,
+      cab_fee: student.cab_fee || 0,
+      camera_fee: student.camera_fee || 0,
+      total_amount: student.total_amount || 0,
+      fee_paid: student.fee_paid,
+      payment_date: student.payment_date,
+      payment_mode: student.payment_mode
+    });
+  } catch (error) {
+    console.error('Error fetching fee breakdown:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // ==================== CREATE STUDENT ====================
 router.post('/', async (req, res) => {
   try {
@@ -233,6 +275,7 @@ router.post('/', async (req, res) => {
       name,
       date_of_birth,
       gender,
+      blood_group,
       class_id,
       section,
       assigned_teacher_id,
@@ -248,12 +291,28 @@ router.post('/', async (req, res) => {
       vehicle_id,
       status,
       documents,
-      fee_amount,
-      kit_charges,
+      registration_fee,
+      admission_fee,
+      tuition_fee,
+      activity_fee,
+      kit_fee,
+      cab_fee,
+      camera_fee,
       fee_paid,
       payment_date,
       payment_mode,
     } = req.body;
+    
+    // Validate mandatory documents
+    if (!documents?.birth_certificate) {
+      return res.status(400).json({ message: 'Birth Certificate is mandatory' });
+    }
+    if (!documents?.parent_aadhar_front) {
+      return res.status(400).json({ message: 'Parent Aadhar (Front) is mandatory' });
+    }
+    if (!documents?.parent_aadhar_back) {
+      return res.status(400).json({ message: 'Parent Aadhar (Back) is mandatory' });
+    }
     
     // Verify teacher exists if provided
     if (assigned_teacher_id) {
@@ -299,15 +358,21 @@ router.post('/', async (req, res) => {
       classType = 'custom';
     }
     
-    // Calculate total amount
-    const feeAmount = parseFloat(fee_amount) || 0;
-    const kitCharges = parseFloat(kit_charges) || 0;
-    const totalAmount = feeAmount + kitCharges;
+    // Calculate total amount from all fee components
+    const regFee = parseFloat(registration_fee) || 0;
+    const admFee = parseFloat(admission_fee) || 0;
+    const tuiFee = parseFloat(tuition_fee) || 0;
+    const actFee = parseFloat(activity_fee) || 0;
+    const kitFee = parseFloat(kit_fee) || 0;
+    const cabFee = parseFloat(cab_fee) || 0;
+    const camFee = parseFloat(camera_fee) || 0;
+    const totalAmount = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     
     const studentData = {
       name,
       date_of_birth: new Date(date_of_birth),
       gender,
+      blood_group: blood_group || '',
       class_id: class_id || null,
       section: section || 'A',
       class_type: classType,
@@ -324,8 +389,13 @@ router.post('/', async (req, res) => {
       vehicle_id: transport_type === 'Cab' ? vehicle_id : null,
       status: status || 'Active',
       documents: uploadedDocuments,
-      fee_amount: feeAmount,
-      kit_charges: kitCharges,
+      registration_fee: regFee,
+      admission_fee: admFee,
+      tuition_fee: tuiFee,
+      activity_fee: actFee,
+      kit_fee: kitFee,
+      cab_fee: cabFee,
+      camera_fee: camFee,
       total_amount: totalAmount,
       fee_paid: fee_paid || false,
       payment_date: payment_date ? new Date(payment_date) : null,
@@ -370,6 +440,7 @@ router.put('/:id', async (req, res) => {
       name,
       date_of_birth,
       gender,
+      blood_group,
       class_id,
       section,
       assigned_teacher_id,
@@ -385,8 +456,13 @@ router.put('/:id', async (req, res) => {
       vehicle_id,
       status,
       documents,
-      fee_amount,
-      kit_charges,
+      registration_fee,
+      admission_fee,
+      tuition_fee,
+      activity_fee,
+      kit_fee,
+      cab_fee,
+      camera_fee,
       fee_paid,
       payment_date,
       payment_mode,
@@ -451,15 +527,21 @@ router.put('/:id', async (req, res) => {
       classType = 'custom';
     }
     
-    // Calculate total amount
-    const feeAmount = parseFloat(fee_amount) !== undefined ? parseFloat(fee_amount) : existingStudent.fee_amount || 0;
-    const kitCharges = parseFloat(kit_charges) !== undefined ? parseFloat(kit_charges) : existingStudent.kit_charges || 0;
-    const totalAmount = feeAmount + kitCharges;
+    // Calculate total amount from all fee components
+    const regFee = parseFloat(registration_fee) !== undefined ? parseFloat(registration_fee) : existingStudent.registration_fee || 0;
+    const admFee = parseFloat(admission_fee) !== undefined ? parseFloat(admission_fee) : existingStudent.admission_fee || 0;
+    const tuiFee = parseFloat(tuition_fee) !== undefined ? parseFloat(tuition_fee) : existingStudent.tuition_fee || 0;
+    const actFee = parseFloat(activity_fee) !== undefined ? parseFloat(activity_fee) : existingStudent.activity_fee || 0;
+    const kitFee = parseFloat(kit_fee) !== undefined ? parseFloat(kit_fee) : existingStudent.kit_fee || 0;
+    const cabFee = parseFloat(cab_fee) !== undefined ? parseFloat(cab_fee) : existingStudent.cab_fee || 0;
+    const camFee = parseFloat(camera_fee) !== undefined ? parseFloat(camera_fee) : existingStudent.camera_fee || 0;
+    const totalAmount = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     
     const studentData = {
       name,
       date_of_birth: new Date(date_of_birth),
       gender,
+      blood_group: blood_group || '',
       class_id: class_id || null,
       section: section || 'A',
       class_type: classType,
@@ -476,8 +558,13 @@ router.put('/:id', async (req, res) => {
       vehicle_id: transport_type === 'Cab' ? vehicle_id : null,
       status: status || 'Active',
       documents: updatedDocuments,
-      fee_amount: feeAmount,
-      kit_charges: kitCharges,
+      registration_fee: regFee,
+      admission_fee: admFee,
+      tuition_fee: tuiFee,
+      activity_fee: actFee,
+      kit_fee: kitFee,
+      cab_fee: cabFee,
+      camera_fee: camFee,
       total_amount: totalAmount,
       fee_paid: fee_paid !== undefined ? fee_paid : existingStudent.fee_paid,
       payment_date: payment_date ? new Date(payment_date) : existingStudent.payment_date,
@@ -586,7 +673,6 @@ router.post('/sync-to-mobile', async (req, res) => {
     
     console.log(`📤 Syncing ${students.length} students to mobile backend...`);
     
-    // Format students for mobile sync
     const studentsForSync = students.map(student => ({
       name: student.name,
       rollNumber: student.rollNumber,
@@ -597,17 +683,22 @@ router.post('/sync-to-mobile', async (req, res) => {
       parent_email: student.parent_email,
       date_of_birth: student.date_of_birth,
       gender: student.gender,
+      blood_group: student.blood_group,
       address: student.address,
       status: student.status,
-      fee_amount: student.fee_amount || 0,
-      kit_charges: student.kit_charges || 0,
+      registration_fee: student.registration_fee || 0,
+      admission_fee: student.admission_fee || 0,
+      tuition_fee: student.tuition_fee || 0,
+      activity_fee: student.activity_fee || 0,
+      kit_fee: student.kit_fee || 0,
+      cab_fee: student.cab_fee || 0,
+      camera_fee: student.camera_fee || 0,
       total_amount: student.total_amount || 0,
       fee_paid: student.fee_paid || false,
       payment_date: student.payment_date || null,
       payment_mode: student.payment_mode || 'Cash',
     }));
     
-    // Check if mobile backend URL is configured
     if (!process.env.MOBILE_BACKEND_URL) {
       return res.status(400).json({ 
         success: false, 
@@ -615,7 +706,6 @@ router.post('/sync-to-mobile', async (req, res) => {
       });
     }
     
-    // Call mobile backend sync endpoint
     const response = await axios.post(
       `${process.env.MOBILE_BACKEND_URL}/api/sync/students`,
       { students: studentsForSync },

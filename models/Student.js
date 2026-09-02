@@ -16,6 +16,11 @@ const studentSchema = new mongoose.Schema({
     required: true,
     enum: ['Male', 'Female'],
   },
+  blood_group: {
+    type: String,
+    enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'],
+    default: '',
+  },
   class_id: {
     type: String,
     default: null,
@@ -82,12 +87,32 @@ const studentSchema = new mongoose.Schema({
     default: 'Active',
   },
   
-  // Fee and Charges Information
-  fee_amount: {
+  // Fee and Charges Information - Updated with all fee types
+  registration_fee: {
     type: Number,
     default: 0,
   },
-  kit_charges: {
+  admission_fee: {
+    type: Number,
+    default: 0,
+  },
+  tuition_fee: {
+    type: Number,
+    default: 0,
+  },
+  activity_fee: {
+    type: Number,
+    default: 0,
+  },
+  kit_fee: {
+    type: Number,
+    default: 0,
+  },
+  cab_fee: {
+    type: Number,
+    default: 0,
+  },
+  camera_fee: {
     type: Number,
     default: 0,
   },
@@ -121,12 +146,27 @@ const studentSchema = new mongoose.Schema({
     default: null,
   },
   
-  // Documents Storage
+  // Documents Storage - Birth Certificate and Parent Aadhar are mandatory
   documents: {
-    birth_certificate: { type: String, default: null },
-    aadhar_card: { type: String, default: null },
-    parent_aadhar_front: { type: String, default: null },
-    parent_aadhar_back: { type: String, default: null },
+    birth_certificate: { 
+      type: String, 
+      required: true,
+      default: null 
+    },
+    aadhar_card: { 
+      type: String, 
+      default: null 
+    },
+    parent_aadhar_front: { 
+      type: String, 
+      required: true,
+      default: null 
+    },
+    parent_aadhar_back: { 
+      type: String, 
+      required: true,
+      default: null 
+    },
   },
   
   created_at: { type: Date, default: Date.now },
@@ -136,20 +176,36 @@ const studentSchema = new mongoose.Schema({
 // Update timestamp on save
 studentSchema.pre('save', function(next) {
   this.updated_at = Date.now();
-  // Auto-calculate total amount
-  if (this.fee_amount !== undefined || this.kit_charges !== undefined) {
-    this.total_amount = (this.fee_amount || 0) + (this.kit_charges || 0);
-  }
+  // Auto-calculate total amount from all fee components
+  this.total_amount = 
+    (this.registration_fee || 0) + 
+    (this.admission_fee || 0) + 
+    (this.tuition_fee || 0) + 
+    (this.activity_fee || 0) + 
+    (this.kit_fee || 0) + 
+    (this.cab_fee || 0) + 
+    (this.camera_fee || 0);
   next();
 });
 
 // Pre-update middleware to calculate total
 studentSchema.pre('findOneAndUpdate', function(next) {
   const update = this.getUpdate();
-  if (update.fee_amount !== undefined || update.kit_charges !== undefined) {
-    const fee = update.fee_amount || 0;
-    const kit = update.kit_charges || 0;
-    update.total_amount = fee + kit;
+  if (update.registration_fee !== undefined || 
+      update.admission_fee !== undefined || 
+      update.tuition_fee !== undefined || 
+      update.activity_fee !== undefined || 
+      update.kit_fee !== undefined || 
+      update.cab_fee !== undefined || 
+      update.camera_fee !== undefined) {
+    const reg = update.registration_fee || 0;
+    const adm = update.admission_fee || 0;
+    const tui = update.tuition_fee || 0;
+    const act = update.activity_fee || 0;
+    const kit = update.kit_fee || 0;
+    const cab = update.cab_fee || 0;
+    const cam = update.camera_fee || 0;
+    update.total_amount = reg + adm + tui + act + kit + cab + cam;
   }
   next();
 });
