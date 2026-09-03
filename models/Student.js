@@ -142,12 +142,17 @@ const studentSchema = new mongoose.Schema({
   // Transport Information
   transport_type: {
     type: String,
-    enum: ['Cab', 'Walker'],
+    enum: ['Cab', 'Walker', 'Bus'],
     default: 'Walker',
   },
   vehicle_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Vehicle',
+    default: null,
+  },
+  vendor_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Vendor',
     default: null,
   },
   
