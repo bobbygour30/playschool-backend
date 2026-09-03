@@ -78,12 +78,12 @@ const feeSchema = new mongoose.Schema({
     default: null,
   },
   
-  // Audit fields
-  created_by: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    default: null,
-  },
+  // Audit fields - Comment out or remove if User model doesn't exist
+  // created_by: {
+  //   type: mongoose.Schema.Types.ObjectId,
+  //   ref: 'User',
+  //   default: null,
+  // },
   created_at: {
     type: Date,
     default: Date.now,

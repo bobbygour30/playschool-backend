@@ -29,7 +29,8 @@ router.get('/fees', async (req, res) => {
     
     const fees = await Fee.find(query)
       .populate('student_id', 'name parent_name parent_phone class_id')
-      .populate('created_by', 'name email')
+      // Remove created_by population or comment it out
+      // .populate('created_by', 'name email')
       .sort({ due_date: 1 });
     
     res.json(fees);
@@ -44,7 +45,8 @@ router.get('/fees/:id', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id)
       .populate('student_id', 'name parent_name parent_phone class_id')
-      .populate('created_by', 'name email');
+      // Remove created_by population or comment it out
+      // .populate('created_by', 'name email');
     
     if (!fee) {
       return res.status(404).json({ message: 'Fee record not found' });
@@ -171,7 +173,8 @@ router.post('/fees', async (req, res) => {
       transaction_id: transaction_id || '',
       notes: notes || '',
       receipt_url: uploadedReceipt,
-      created_by: created_by || null,
+      // Don't set created_by if it might cause issues
+      // created_by: created_by || null,
     };
     
     const fee = new Fee(feeData);
@@ -179,6 +182,8 @@ router.post('/fees', async (req, res) => {
     
     const populatedFee = await Fee.findById(savedFee._id)
       .populate('student_id', 'name parent_name');
+    // Remove created_by population
+    // .populate('created_by', 'name email');
     
     res.status(201).json(populatedFee);
   } catch (error) {
@@ -258,6 +263,8 @@ router.put('/fees/:id', async (req, res) => {
       feeData,
       { new: true, runValidators: true }
     ).populate('student_id', 'name parent_name');
+    // Remove created_by population
+    // .populate('created_by', 'name email');
     
     res.json(fee);
   } catch (error) {
@@ -306,8 +313,9 @@ router.get('/expenses', async (req, res) => {
     }
     
     const expenses = await Expense.find(query)
-      .populate('created_by', 'name email')
-      .populate('approved_by', 'name email')
+      // Remove created_by and approved_by populations
+      // .populate('created_by', 'name email')
+      // .populate('approved_by', 'name email')
       .sort({ date: -1 });
     
     res.json(expenses);
@@ -320,9 +328,10 @@ router.get('/expenses', async (req, res) => {
 // Get expense by ID
 router.get('/expenses/:id', async (req, res) => {
   try {
-    const expense = await Expense.findById(req.params.id)
-      .populate('created_by', 'name email')
-      .populate('approved_by', 'name email');
+    const expense = await Expense.findById(req.params.id);
+      // Remove created_by and approved_by populations
+      // .populate('created_by', 'name email')
+      // .populate('approved_by', 'name email');
     
     if (!expense) {
       return res.status(404).json({ message: 'Expense not found' });
@@ -367,16 +376,17 @@ router.post('/expenses', async (req, res) => {
       bill_number: bill_number || '',
       payment_mode: payment_mode || 'Cash',
       receipt_url: uploadedReceipt,
-      approved_by: approved_by || null,
+      // approved_by: approved_by || null,
       notes: notes || '',
-      created_by: created_by || null,
+      // created_by: created_by || null,
     };
     
     const expense = new Expense(expenseData);
     const savedExpense = await expense.save();
     
-    const populatedExpense = await Expense.findById(savedExpense._id)
-      .populate('created_by', 'name email');
+    const populatedExpense = await Expense.findById(savedExpense._id);
+      // Remove population
+      // .populate('created_by', 'name email');
     
     res.status(201).json(populatedExpense);
   } catch (error) {
@@ -426,7 +436,7 @@ router.put('/expenses/:id', async (req, res) => {
       bill_number: bill_number || '',
       payment_mode,
       receipt_url: uploadedReceipt,
-      approved_by: approved_by || null,
+      // approved_by: approved_by || null,
       notes: notes || '',
       updated_at: Date.now(),
     };
@@ -435,7 +445,9 @@ router.put('/expenses/:id', async (req, res) => {
       id,
       expenseData,
       { new: true, runValidators: true }
-    ).populate('created_by', 'name email');
+    );
+    // Remove population
+    // .populate('created_by', 'name email');
     
     res.json(expense);
   } catch (error) {
@@ -489,7 +501,8 @@ router.get('/salaries', async (req, res) => {
     
     const salaries = await Salary.find(query)
       .populate('staff_id', 'name designation department')
-      .populate('created_by', 'name email')
+      // Remove created_by population
+      // .populate('created_by', 'name email')
       .sort({ month: -1 });
     
     res.json(salaries);
@@ -503,8 +516,9 @@ router.get('/salaries', async (req, res) => {
 router.get('/salaries/:id', async (req, res) => {
   try {
     const salary = await Salary.findById(req.params.id)
-      .populate('staff_id', 'name designation department salary account_number bank_name')
-      .populate('created_by', 'name email');
+      .populate('staff_id', 'name designation department salary account_number bank_name');
+      // Remove created_by population
+      // .populate('created_by', 'name email');
     
     if (!salary) {
       return res.status(404).json({ message: 'Salary record not found' });
@@ -589,7 +603,7 @@ router.post('/salaries', async (req, res) => {
       transaction_id: transaction_id || '',
       remarks: remarks || '',
       salary_slip_url: uploadedSlip,
-      created_by: created_by || null,
+      // created_by: created_by || null,
     };
     
     const salary = new Salary(salaryData);
@@ -597,6 +611,8 @@ router.post('/salaries', async (req, res) => {
     
     const populatedSalary = await Salary.findById(savedSalary._id)
       .populate('staff_id', 'name designation');
+      // Remove created_by population
+      // .populate('created_by', 'name email');
     
     res.status(201).json(populatedSalary);
   } catch (error) {
@@ -656,6 +672,8 @@ router.put('/salaries/:id', async (req, res) => {
       salaryData,
       { new: true, runValidators: true }
     ).populate('staff_id', 'name designation');
+    // Remove created_by population
+    // .populate('created_by', 'name email');
     
     res.json(salary);
   } catch (error) {
