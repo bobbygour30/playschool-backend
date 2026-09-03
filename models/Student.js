@@ -179,6 +179,15 @@ const studentSchema = new mongoose.Schema({
     },
   },
   
+  // Promotion audit trail — records every class change made by the
+  // "Promote Students" bulk action, for history/reporting purposes.
+  promotion_history: [{
+    from_class: { type: String, default: '' },
+    to_class: { type: String, default: '' }, // 'Graduated' when the student completes KG-1
+    academic_year: { type: String, default: '' },
+    promoted_at: { type: Date, default: Date.now },
+  }],
+  
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
 });

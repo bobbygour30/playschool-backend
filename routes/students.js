@@ -766,4 +766,74 @@ router.post('/:id/sync-to-mobile', async (req, res) => {
   }
 });
 
+// ==================== PROMOTE ALL STUDENTS TO NEXT CLASS ====================
+// Class progression ladder for this school. KG-1 is the terminal class —
+// students there move to status "Graduated" instead of a new class_id.
+const CLASS_PROGRESSION = {
+  'toddler': 'pre-nursery',
+  'pre-nursery': 'nursery',
+  'nursery': 'kg-1',
+  'kg-1': null, // null = graduates, doesn't move to another class
+};
+
+router.post('/promote-all', async (req, res) => {
+  try {
+    const { academic_year } = req.body;
+
+    // Only currently Active students are eligible — Inactive/Graduated
+    // students are left untouched.
+    const students = await Student.find({ status: 'Active' });
+
+    const results = { promoted: 0, graduated: 0, skipped: 0, details: [] };
+
+    for (const student of students) {
+      const currentClass = student.class_id;
+
+      // Students with no class or a non-standard/custom class_id can't be
+      // auto-promoted — skip them so an admin can handle them manually.
+      if (!currentClass || !(currentClass in CLASS_PROGRESSION)) {
+        results.skipped++;
+        continue;
+      }
+
+      const nextClass = CLASS_PROGRESSION[currentClass];
+      student.promotion_history = student.promotion_history || [];
+
+      if (nextClass === null) {
+        // Top of the ladder — graduate the student
+        student.status = 'Graduated';
+        student.promotion_history.push({
+          from_class: currentClass,
+          to_class: 'Graduated',
+          academic_year: academic_year || '',
+          promoted_at: new Date(),
+        });
+        results.graduated++;
+        results.details.push({ id: student._id, name: student.name, from: currentClass, to: 'Graduated' });
+      } else {
+        student.promotion_history.push({
+          from_class: currentClass,
+          to_class: nextClass,
+          academic_year: academic_year || '',
+          promoted_at: new Date(),
+        });
+        student.class_id = nextClass;
+        results.promoted++;
+        results.details.push({ id: student._id, name: student.name, from: currentClass, to: nextClass });
+      }
+
+      await student.save();
+    }
+
+    res.json({
+      success: true,
+      message: `Promotion complete: ${results.promoted} promoted, ${results.graduated} graduated, ${results.skipped} skipped`,
+      results,
+    });
+  } catch (error) {
+    console.error('Error promoting students:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 module.exports = router;
