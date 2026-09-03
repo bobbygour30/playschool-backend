@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const axios = require('axios');
 const Student = require('../models/Student');
 const Staff = require('../models/Staff');
+const Fee = require('../models/Fee');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
@@ -78,6 +79,64 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
     }
   } catch (error) {
     console.error('Sync to mobile error:', error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+// Helper function to sync student fees to finance module
+const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
+  try {
+    // Check if fee record already exists for this student
+    let existingFee = await Fee.findOne({ 
+      student_id: studentData._id 
+    });
+    
+    // Calculate total fee from all components
+    const totalAmount = 
+      (studentData.registration_fee || 0) + 
+      (studentData.admission_fee || 0) + 
+      (studentData.tuition_fee || 0) + 
+      (studentData.activity_fee || 0) + 
+      (studentData.kit_fee || 0) + 
+      (studentData.cab_fee || 0) + 
+      (studentData.camera_fee || 0);
+    
+    const feeData = {
+      student_id: studentData._id,
+      registration_fee: studentData.registration_fee || 0,
+      admission_fee: studentData.admission_fee || 0,
+      tuition_fee: studentData.tuition_fee || 0,
+      activity_fee: studentData.activity_fee || 0,
+      kit_fee: studentData.kit_fee || 0,
+      transport_fee: studentData.cab_fee || 0, // Map cab_fee to transport_fee
+      camera_fee: studentData.camera_fee || 0,
+      total_amount: totalAmount,
+      due_date: studentData.enrollment_date || new Date(),
+      status: studentData.fee_paid ? 'Paid' : 'Pending',
+      payment_date: studentData.payment_date || null,
+      payment_method: studentData.payment_mode || 'Cash',
+      notes: `Auto-created from student registration - ${studentData.name}`,
+    };
+    
+    if (existingFee) {
+      // Update existing fee record
+      const updatedFee = await Fee.findByIdAndUpdate(
+        existingFee._id,
+        { 
+          ...feeData,
+          updated_at: Date.now() 
+        },
+        { new: true, runValidators: true }
+      );
+      return { success: true, data: updatedFee, action: 'updated' };
+    } else {
+      // Create new fee record
+      const newFee = new Fee(feeData);
+      await newFee.save();
+      return { success: true, data: newFee, action: 'created' };
+    }
+  } catch (error) {
+    console.error('Error syncing student fees to finance:', error.message);
     return { success: false, error: error.message };
   }
 };
@@ -408,6 +467,10 @@ router.post('/', async (req, res) => {
     const student = new Student(studentData);
     const savedStudent = await student.save();
     
+    // Sync student fees to finance module (AUTOMATIC)
+    const feeSyncResult = await syncStudentFeesToFinance(savedStudent, false);
+    console.log(`💰 Fee sync result for ${savedStudent.name}: ${feeSyncResult.action}`);
+    
     // Sync to mobile backend
     const syncResult = await syncStudentToMobile(savedStudent);
     
@@ -421,6 +484,7 @@ router.post('/', async (req, res) => {
     
     const responseData = populatedStudent.toObject();
     responseData.sync = syncResult;
+    responseData.feeSync = feeSyncResult;
     
     res.status(201).json(responseData);
   } catch (error) {
@@ -587,11 +651,16 @@ router.put('/:id', async (req, res) => {
       select: 'name designation email phone role'
     });
     
+    // Sync student fees to finance module (AUTOMATIC)
+    const feeSyncResult = await syncStudentFeesToFinance(student, true);
+    console.log(`💰 Fee sync result for ${student.name}: ${feeSyncResult.action}`);
+    
     // Sync to mobile backend
     const syncResult = await syncStudentToMobile(student);
     
     const responseData = student.toObject();
     responseData.sync = syncResult;
+    responseData.feeSync = feeSyncResult;
     
     res.json(responseData);
   } catch (error) {
@@ -621,6 +690,26 @@ router.patch('/:id/fee', async (req, res) => {
     student.updated_at = Date.now();
     
     await student.save();
+    
+    // Update fee record in finance module (AUTOMATIC)
+    try {
+      const existingFee = await Fee.findOne({ student_id: student._id });
+      if (existingFee) {
+        await Fee.findByIdAndUpdate(existingFee._id, {
+          status: fee_paid ? 'Paid' : 'Pending',
+          payment_date: student.payment_date,
+          payment_method: student.payment_mode,
+          updated_at: Date.now()
+        });
+        console.log(`💰 Fee status updated for ${student.name} in finance module`);
+      } else {
+        // If no fee record exists, create one (sync all fees)
+        await syncStudentFeesToFinance(student, false);
+        console.log(`💰 New fee record created for ${student.name} in finance module`);
+      }
+    } catch (feeError) {
+      console.error('Error updating fee in finance module:', feeError.message);
+    }
     
     // Sync to mobile backend
     const syncResult = await syncStudentToMobile(student);
@@ -658,6 +747,17 @@ router.delete('/:id', async (req, res) => {
       if (student.documents.parent_aadhar_back) {
         await deleteFromCloudinary(student.documents.parent_aadhar_back);
       }
+    }
+    
+    // Delete associated fee record from finance module
+    try {
+      const feeRecord = await Fee.findOne({ student_id: student._id });
+      if (feeRecord) {
+        await Fee.findByIdAndDelete(feeRecord._id);
+        console.log(`💰 Fee record deleted for ${student.name} from finance module`);
+      }
+    } catch (feeError) {
+      console.error('Error deleting fee record:', feeError.message);
     }
     
     // Sync deletion to mobile backend
@@ -762,6 +862,50 @@ router.post('/:id/sync-to-mobile', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: error.message 
+    });
+  }
+});
+
+// ==================== SYNC ALL STUDENT FEES TO FINANCE (Manual backfill) ====================
+router.post('/sync-fees-to-finance', async (req, res) => {
+  try {
+    const students = await Student.find();
+    let created = 0;
+    let updated = 0;
+    let failed = 0;
+    const errors = [];
+    
+    console.log(`💰 Syncing ${students.length} student fee records to finance module...`);
+    
+    for (const student of students) {
+      try {
+        const result = await syncStudentFeesToFinance(student, true);
+        if (result.success) {
+          if (result.action === 'created') created++;
+          else if (result.action === 'updated') updated++;
+        } else {
+          failed++;
+          errors.push({ student: student.name, error: result.error });
+        }
+      } catch (error) {
+        failed++;
+        errors.push({ student: student.name, error: error.message });
+      }
+    }
+    
+    console.log(`💰 Fee sync completed: ${created} created, ${updated} updated, ${failed} failed`);
+    
+    res.json({
+      success: true,
+      message: `Fee sync completed: ${created} created, ${updated} updated, ${failed} failed`,
+      results: { created, updated, failed, errors }
+    });
+  } catch (error) {
+    console.error('Error syncing fees to finance:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to sync student fees to finance',
+      error: error.message 
     });
   }
 });

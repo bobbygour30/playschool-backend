@@ -57,10 +57,48 @@ router.get('/fees/:id', async (req, res) => {
   }
 });
 
-// Get fees by student
+// Get fees by student with auto-creation if missing
 router.get('/fees/student/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
+    
+    // First try to find fee record in Fee collection
+    let feeRecord = await Fee.findOne({ student_id: studentId });
+    
+    // If no fee record exists, check if student exists and create one
+    if (!feeRecord) {
+      const student = await Student.findById(studentId);
+      if (student) {
+        // Create fee record from student data
+        const totalAmount = 
+          (student.registration_fee || 0) + 
+          (student.admission_fee || 0) + 
+          (student.tuition_fee || 0) + 
+          (student.activity_fee || 0) + 
+          (student.kit_fee || 0) + 
+          (student.cab_fee || 0) + 
+          (student.camera_fee || 0);
+        
+        feeRecord = await Fee.create({
+          student_id: student._id,
+          registration_fee: student.registration_fee || 0,
+          admission_fee: student.admission_fee || 0,
+          tuition_fee: student.tuition_fee || 0,
+          activity_fee: student.activity_fee || 0,
+          kit_fee: student.kit_fee || 0,
+          transport_fee: student.cab_fee || 0,
+          camera_fee: student.camera_fee || 0,
+          total_amount: totalAmount,
+          due_date: student.enrollment_date || new Date(),
+          status: student.fee_paid ? 'Paid' : 'Pending',
+          payment_date: student.payment_date || null,
+          payment_method: student.payment_mode || 'Cash',
+          notes: `Auto-created from student data - ${student.name}`,
+        });
+        console.log(`💰 Auto-created fee record for student: ${student.name}`);
+      }
+    }
+    
     const fees = await Fee.find({ student_id: studentId })
       .sort({ due_date: -1 });
     
@@ -76,10 +114,13 @@ router.post('/fees', async (req, res) => {
   try {
     const {
       student_id,
+      registration_fee,
       admission_fee,
       tuition_fee,
       transport_fee,
       activity_fee,
+      kit_fee,
+      camera_fee,
       total_amount,
       due_date,
       status,
@@ -103,13 +144,26 @@ router.post('/fees', async (req, res) => {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/receipts');
     }
     
+    // Calculate total if not provided
+    const calculatedTotal = total_amount || 
+      (parseFloat(registration_fee) || 0) + 
+      (parseFloat(admission_fee) || 0) + 
+      (parseFloat(tuition_fee) || 0) + 
+      (parseFloat(transport_fee) || 0) + 
+      (parseFloat(activity_fee) || 0) + 
+      (parseFloat(kit_fee) || 0) + 
+      (parseFloat(camera_fee) || 0);
+    
     const feeData = {
       student_id,
+      registration_fee: registration_fee || 0,
       admission_fee: admission_fee || 0,
       tuition_fee: tuition_fee || 0,
       transport_fee: transport_fee || 0,
       activity_fee: activity_fee || 0,
-      total_amount,
+      kit_fee: kit_fee || 0,
+      camera_fee: camera_fee || 0,
+      total_amount: calculatedTotal,
       due_date: new Date(due_date),
       status: status || 'Pending',
       payment_date: payment_date ? new Date(payment_date) : null,
@@ -144,10 +198,13 @@ router.put('/fees/:id', async (req, res) => {
     }
     
     const {
+      registration_fee,
       admission_fee,
       tuition_fee,
       transport_fee,
       activity_fee,
+      kit_fee,
+      camera_fee,
       total_amount,
       due_date,
       status,
@@ -167,12 +224,25 @@ router.put('/fees/:id', async (req, res) => {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/receipts');
     }
     
+    // Calculate total if not provided
+    const calculatedTotal = total_amount || 
+      (parseFloat(registration_fee) || 0) + 
+      (parseFloat(admission_fee) || 0) + 
+      (parseFloat(tuition_fee) || 0) + 
+      (parseFloat(transport_fee) || 0) + 
+      (parseFloat(activity_fee) || 0) + 
+      (parseFloat(kit_fee) || 0) + 
+      (parseFloat(camera_fee) || 0);
+    
     const feeData = {
+      registration_fee: registration_fee || 0,
       admission_fee: admission_fee || 0,
       tuition_fee: tuition_fee || 0,
       transport_fee: transport_fee || 0,
       activity_fee: activity_fee || 0,
-      total_amount,
+      kit_fee: kit_fee || 0,
+      camera_fee: camera_fee || 0,
+      total_amount: calculatedTotal,
       due_date: new Date(due_date),
       status,
       payment_date: payment_date ? new Date(payment_date) : null,
