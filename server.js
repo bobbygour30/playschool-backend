@@ -85,6 +85,8 @@ app.use('/api/classes', require('./routes/classes'));
 
 app.use('/api/parents', require('./routes/parents'));
 app.use('/api/faculty-auth', require('./routes/facultyAuth'));
+app.use('/api/holiday-leave', require('./routes/holidayLeaveRoutes'));
+
 
 // ==================== ERROR HANDLER ====================
 app.use(require('./middleware/errorHandler'));
