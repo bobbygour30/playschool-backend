@@ -51,7 +51,7 @@ const studentSchema = new mongoose.Schema({
   },
   parent_relationship: {
     type: String,
-    enum: ['Mother', 'Father', 'Guardian'],
+    enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling'],
     default: 'Mother',
   },
   parent_email: {
@@ -72,10 +72,25 @@ const studentSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  
+  // ==================== EMERGENCY CONTACT (New) ====================
   emergency_contact: {
-    type: String,
-    required: true,
+    name: {
+      type: String,
+      required: true,
+    },
+    relationship: {
+      type: String,
+      enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other'],
+      required: true,
+    },
+    phone: {
+      type: String,
+      required: true,
+      match: /^\d{10}$/,
+    },
   },
+  
   medical_info: {
     type: String,
     default: '',
@@ -92,7 +107,7 @@ const studentSchema = new mongoose.Schema({
     default: 'Active',
   },
   
-  // Fee and Charges Information - Updated with all fee types
+  // ==================== FEE AND CHARGES (Updated) ====================
   registration_fee: {
     type: Number,
     default: 0,
@@ -121,6 +136,16 @@ const studentSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  fee_frequency: {
+    type: String,
+    enum: ['Monthly', 'Quarterly', 'Annual'],
+    default: 'Monthly',
+  },
+  discount: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
   total_amount: {
     type: Number,
     default: 0,
@@ -139,7 +164,7 @@ const studentSchema = new mongoose.Schema({
     default: 'Cash',
   },
   
-  // Transport Information
+  // ==================== TRANSPORT INFORMATION ====================
   transport_type: {
     type: String,
     enum: ['Cab', 'Walker', 'Bus'],
@@ -156,26 +181,49 @@ const studentSchema = new mongoose.Schema({
     default: null,
   },
   
-  // Documents Storage - Birth Certificate and Parent Aadhar are mandatory
+  // ==================== AUTHORIZED PICKUP (Only for Walker) ====================
+  authorized_pickup: {
+    name: {
+      type: String,
+      default: '',
+    },
+    relationship: {
+      type: String,
+      enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other'],
+      default: '',
+    },
+    phone: {
+      type: String,
+      default: '',
+      match: /^\d{10}$/,
+    },
+  },
+  
+  // ==================== DOCUMENTS (Updated with Student Photo) ====================
   documents: {
-    birth_certificate: { 
-      type: String, 
+    student_photo: {
+      type: String,
       required: true,
-      default: null 
+      default: null,
     },
-    aadhar_card: { 
-      type: String, 
-      default: null 
-    },
-    parent_aadhar_front: { 
-      type: String, 
+    birth_certificate: {
+      type: String,
       required: true,
-      default: null 
+      default: null,
     },
-    parent_aadhar_back: { 
-      type: String, 
+    aadhar_card: {
+      type: String,
+      default: null,
+    },
+    parent_aadhar_front: {
+      type: String,
       required: true,
-      default: null 
+      default: null,
+    },
+    parent_aadhar_back: {
+      type: String,
+      required: true,
+      default: null,
     },
   },
   
@@ -183,14 +231,12 @@ const studentSchema = new mongoose.Schema({
   // "Promote Students" bulk action, for history/reporting purposes.
   promotion_history: [{
     from_class: { type: String, default: '' },
-    to_class: { type: String, default: '' }, // 'Graduated' when the student completes KG-1
+    to_class: { type: String, default: '' },
     academic_year: { type: String, default: '' },
     promoted_at: { type: Date, default: Date.now },
   }],
   
-  // ==================== NEW FIELDS FOR HOLIDAY & LEAVE MANAGEMENT ====================
-  
-  // Leave balance tracking for students
+  // ==================== LEAVE & HOLIDAY MANAGEMENT ====================
   leave_balances: {
     sick: {
       total: { type: Number, default: 10 },
@@ -214,7 +260,6 @@ const studentSchema = new mongoose.Schema({
     },
   },
   
-  // Parent/Guardian preferences for leave notifications
   preferences: {
     notifications: {
       email: { type: Boolean, default: true },
@@ -227,7 +272,6 @@ const studentSchema = new mongoose.Schema({
     },
   },
   
-  // Attendance tracking
   attendance: {
     present_days: { type: Number, default: 0 },
     absent_days: { type: Number, default: 0 },
@@ -235,7 +279,6 @@ const studentSchema = new mongoose.Schema({
     attendance_percentage: { type: Number, default: 0 },
   },
   
-  // Leave history summary (cached for quick access)
   leave_summary: {
     total_leaves: { type: Number, default: 0 },
     pending_leaves: { type: Number, default: 0 },
@@ -250,12 +293,11 @@ const studentSchema = new mongoose.Schema({
 
 // ==================== PRE-SAVE MIDDLEWARE ====================
 
-// Update timestamp on save
 studentSchema.pre('save', function(next) {
   this.updated_at = Date.now();
   
   // Auto-calculate total amount from all fee components
-  this.total_amount = 
+  const subtotal = 
     (this.registration_fee || 0) + 
     (this.admission_fee || 0) + 
     (this.tuition_fee || 0) + 
@@ -263,6 +305,8 @@ studentSchema.pre('save', function(next) {
     (this.kit_fee || 0) + 
     (this.cab_fee || 0) + 
     (this.camera_fee || 0);
+  
+  this.total_amount = Math.max(0, subtotal - (this.discount || 0));
   
   // Update attendance percentage
   if (this.attendance.total_days > 0) {
@@ -282,7 +326,9 @@ studentSchema.pre('findOneAndUpdate', function(next) {
       update.activity_fee !== undefined || 
       update.kit_fee !== undefined || 
       update.cab_fee !== undefined || 
-      update.camera_fee !== undefined) {
+      update.camera_fee !== undefined ||
+      update.discount !== undefined) {
+    
     const reg = update.registration_fee || 0;
     const adm = update.admission_fee || 0;
     const tui = update.tuition_fee || 0;
@@ -290,7 +336,9 @@ studentSchema.pre('findOneAndUpdate', function(next) {
     const kit = update.kit_fee || 0;
     const cab = update.cab_fee || 0;
     const cam = update.camera_fee || 0;
-    update.total_amount = reg + adm + tui + act + kit + cab + cam;
+    const discount = update.discount || 0;
+    const subtotal = reg + adm + tui + act + kit + cab + cam;
+    update.total_amount = Math.max(0, subtotal - discount);
   }
   next();
 });
@@ -469,9 +517,6 @@ studentSchema.methods.updateLeaveSummary = async function() {
 studentSchema.methods.recordAttendance = async function(status, date = new Date()) {
   const today = new Date(date);
   today.setHours(0, 0, 0, 0);
-  
-  // Check if already recorded for this date (implement your own logic)
-  // This is a simplified version
   
   if (status === 'present') {
     this.attendance.present_days += 1;
@@ -658,12 +703,13 @@ studentSchema.set('toObject', { virtuals: true });
 
 // ==================== INDEXES ====================
 
-// Create indexes for better performance
 studentSchema.index({ class_id: 1, status: 1 });
 studentSchema.index({ 'leave_balances.sick.remaining': 1 });
 studentSchema.index({ 'attendance.attendance_percentage': -1 });
 studentSchema.index({ status: 1, created_at: -1 });
 studentSchema.index({ parent_phone: 1 });
 studentSchema.index({ parent_email: 1 });
+studentSchema.index({ 'emergency_contact.phone': 1 });
+studentSchema.index({ 'authorized_pickup.phone': 1 });
 
 module.exports = mongoose.model('Student', studentSchema);

@@ -59,10 +59,18 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         kit_fee: studentData.kit_fee || 0,
         cab_fee: studentData.cab_fee || 0,
         camera_fee: studentData.camera_fee || 0,
+        fee_frequency: studentData.fee_frequency || 'Monthly',
+        discount: studentData.discount || 0,
         total_amount: studentData.total_amount || 0,
         fee_paid: studentData.fee_paid || false,
         payment_date: studentData.payment_date || null,
         payment_mode: studentData.payment_mode || 'Cash',
+        // Emergency Contact
+        emergency_contact: studentData.emergency_contact || {},
+        // Authorized Pickup
+        authorized_pickup: studentData.authorized_pickup || {},
+        // Documents
+        documents: studentData.documents || {},
       };
       
       const response = await axios.post(
@@ -91,8 +99,8 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       student_id: studentData._id 
     });
     
-    // Calculate total fee from all components
-    const totalAmount = 
+    // Calculate total fee from all components with discount
+    const subtotal = 
       (studentData.registration_fee || 0) + 
       (studentData.admission_fee || 0) + 
       (studentData.tuition_fee || 0) + 
@@ -100,6 +108,7 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       (studentData.kit_fee || 0) + 
       (studentData.cab_fee || 0) + 
       (studentData.camera_fee || 0);
+    const totalAmount = Math.max(0, subtotal - (studentData.discount || 0));
     
     const feeData = {
       student_id: studentData._id,
@@ -108,8 +117,10 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       tuition_fee: studentData.tuition_fee || 0,
       activity_fee: studentData.activity_fee || 0,
       kit_fee: studentData.kit_fee || 0,
-      transport_fee: studentData.cab_fee || 0, // Map cab_fee to transport_fee
+      transport_fee: studentData.cab_fee || 0,
       camera_fee: studentData.camera_fee || 0,
+      fee_frequency: studentData.fee_frequency || 'Monthly',
+      discount: studentData.discount || 0,
       total_amount: totalAmount,
       due_date: studentData.enrollment_date || new Date(),
       status: studentData.fee_paid ? 'Paid' : 'Pending',
@@ -268,6 +279,7 @@ router.get('/stats/fee-summary', async (req, res) => {
         totalKitFee: { $sum: '$kit_fee' },
         totalCabFee: { $sum: '$cab_fee' },
         totalCameraFee: { $sum: '$camera_fee' },
+        totalDiscount: { $sum: '$discount' },
         totalAmount: { $sum: '$total_amount' },
         paidAmount: { $sum: { $cond: ['$fee_paid', '$total_amount', 0] } },
         unpaidAmount: { $sum: { $cond: ['$fee_paid', 0, '$total_amount'] } }
@@ -282,6 +294,7 @@ router.get('/stats/fee-summary', async (req, res) => {
       totalKitFee: 0,
       totalCabFee: 0,
       totalCameraFee: 0,
+      totalDiscount: 0,
       totalAmount: 0,
       paidAmount: 0,
       unpaidAmount: 0
@@ -317,6 +330,8 @@ router.get('/fee-breakdown/:id', async (req, res) => {
       kit_fee: student.kit_fee || 0,
       cab_fee: student.cab_fee || 0,
       camera_fee: student.camera_fee || 0,
+      fee_frequency: student.fee_frequency || 'Monthly',
+      discount: student.discount || 0,
       total_amount: student.total_amount || 0,
       fee_paid: student.fee_paid,
       payment_date: student.payment_date,
@@ -350,6 +365,7 @@ router.post('/', async (req, res) => {
       enrollment_date,
       transport_type,
       vehicle_id,
+      vendor_id,
       status,
       documents,
       registration_fee,
@@ -359,12 +375,18 @@ router.post('/', async (req, res) => {
       kit_fee,
       cab_fee,
       camera_fee,
+      fee_frequency,
+      discount,
       fee_paid,
       payment_date,
       payment_mode,
+      authorized_pickup,
     } = req.body;
     
     // Validate mandatory documents
+    if (!documents?.student_photo) {
+      return res.status(400).json({ message: 'Student Photo is mandatory' });
+    }
     if (!documents?.birth_certificate) {
       return res.status(400).json({ message: 'Birth Certificate is mandatory' });
     }
@@ -373,6 +395,21 @@ router.post('/', async (req, res) => {
     }
     if (!documents?.parent_aadhar_back) {
       return res.status(400).json({ message: 'Parent Aadhar (Back) is mandatory' });
+    }
+    
+    // Validate emergency contact
+    if (!emergency_contact?.name || !emergency_contact?.relationship || !emergency_contact?.phone) {
+      return res.status(400).json({ message: 'Emergency Contact is required with name, relationship, and phone' });
+    }
+    if (!/^\d{10}$/.test(emergency_contact.phone)) {
+      return res.status(400).json({ message: 'Emergency Contact phone must be exactly 10 digits' });
+    }
+    
+    // Validate authorized pickup if Walker
+    if (transport_type === 'Walker' && authorized_pickup) {
+      if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
+        return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
+      }
     }
     
     // Verify teacher exists if provided
@@ -387,6 +424,12 @@ router.post('/', async (req, res) => {
     const uploadedDocuments = {};
     
     if (documents) {
+      if (documents.student_photo) {
+        uploadedDocuments.student_photo = await uploadToCloudinary(
+          documents.student_photo,
+          'students/photos'
+        );
+      }
       if (documents.birth_certificate) {
         uploadedDocuments.birth_certificate = await uploadToCloudinary(
           documents.birth_certificate,
@@ -419,7 +462,7 @@ router.post('/', async (req, res) => {
       classType = 'custom';
     }
     
-    // Calculate total amount from all fee components
+    // Calculate total amount from all fee components with discount
     const regFee = parseFloat(registration_fee) || 0;
     const admFee = parseFloat(admission_fee) || 0;
     const tuiFee = parseFloat(tuition_fee) || 0;
@@ -427,7 +470,9 @@ router.post('/', async (req, res) => {
     const kitFee = parseFloat(kit_fee) || 0;
     const cabFee = parseFloat(cab_fee) || 0;
     const camFee = parseFloat(camera_fee) || 0;
-    const totalAmount = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
+    const disc = parseFloat(discount) || 0;
+    const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
+    const totalAmount = Math.max(0, subtotal - disc);
     
     const studentData = {
       name,
@@ -444,11 +489,16 @@ router.post('/', async (req, res) => {
       parent_phone,
       parent_aadhar: parent_aadhar || '',
       address,
-      emergency_contact,
+      emergency_contact: {
+        name: emergency_contact.name,
+        relationship: emergency_contact.relationship,
+        phone: emergency_contact.phone,
+      },
       medical_info: medical_info || '',
       enrollment_date: new Date(enrollment_date),
       transport_type: transport_type || 'Walker',
-      vehicle_id: transport_type === 'Cab' ? vehicle_id : null,
+      vehicle_id: transport_type !== 'Walker' ? vehicle_id : null,
+      vendor_id: transport_type !== 'Walker' ? vendor_id : null,
       status: status || 'Active',
       documents: uploadedDocuments,
       registration_fee: regFee,
@@ -458,11 +508,22 @@ router.post('/', async (req, res) => {
       kit_fee: kitFee,
       cab_fee: cabFee,
       camera_fee: camFee,
+      fee_frequency: fee_frequency || 'Monthly',
+      discount: disc,
       total_amount: totalAmount,
       fee_paid: fee_paid || false,
       payment_date: payment_date ? new Date(payment_date) : null,
       payment_mode: payment_mode || 'Cash',
     };
+    
+    // Add authorized pickup only if Walker
+    if (transport_type === 'Walker' && authorized_pickup) {
+      studentData.authorized_pickup = {
+        name: authorized_pickup.name || '',
+        relationship: authorized_pickup.relationship || '',
+        phone: authorized_pickup.phone || '',
+      };
+    }
     
     const student = new Student(studentData);
     const savedStudent = await student.save();
@@ -522,6 +583,7 @@ router.put('/:id', async (req, res) => {
       enrollment_date,
       transport_type,
       vehicle_id,
+      vendor_id,
       status,
       documents,
       registration_fee,
@@ -531,9 +593,12 @@ router.put('/:id', async (req, res) => {
       kit_fee,
       cab_fee,
       camera_fee,
+      fee_frequency,
+      discount,
       fee_paid,
       payment_date,
       payment_mode,
+      authorized_pickup,
     } = req.body;
     
     // Verify teacher exists if provided
@@ -544,10 +609,39 @@ router.put('/:id', async (req, res) => {
       }
     }
     
+    // Validate emergency contact if provided
+    if (emergency_contact) {
+      if (!emergency_contact.name || !emergency_contact.relationship || !emergency_contact.phone) {
+        return res.status(400).json({ message: 'Emergency Contact requires name, relationship, and phone' });
+      }
+      if (!/^\d{10}$/.test(emergency_contact.phone)) {
+        return res.status(400).json({ message: 'Emergency Contact phone must be exactly 10 digits' });
+      }
+    }
+    
+    // Validate authorized pickup if Walker
+    if (transport_type === 'Walker' && authorized_pickup) {
+      if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
+        return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
+      }
+    }
+    
     // Handle document updates
     const updatedDocuments = { ...existingStudent.documents };
     
     if (documents) {
+      // Student Photo
+      if (documents.student_photo && documents.student_photo !== existingStudent.documents?.student_photo) {
+        if (existingStudent.documents?.student_photo) {
+          await deleteFromCloudinary(existingStudent.documents.student_photo);
+        }
+        updatedDocuments.student_photo = await uploadToCloudinary(
+          documents.student_photo,
+          'students/photos'
+        );
+      }
+      
+      // Birth Certificate
       if (documents.birth_certificate && documents.birth_certificate !== existingStudent.documents?.birth_certificate) {
         if (existingStudent.documents?.birth_certificate) {
           await deleteFromCloudinary(existingStudent.documents.birth_certificate);
@@ -558,6 +652,7 @@ router.put('/:id', async (req, res) => {
         );
       }
       
+      // Aadhar Card
       if (documents.aadhar_card && documents.aadhar_card !== existingStudent.documents?.aadhar_card) {
         if (existingStudent.documents?.aadhar_card) {
           await deleteFromCloudinary(existingStudent.documents.aadhar_card);
@@ -568,6 +663,7 @@ router.put('/:id', async (req, res) => {
         );
       }
       
+      // Parent Aadhar Front
       if (documents.parent_aadhar_front && documents.parent_aadhar_front !== existingStudent.documents?.parent_aadhar_front) {
         if (existingStudent.documents?.parent_aadhar_front) {
           await deleteFromCloudinary(existingStudent.documents.parent_aadhar_front);
@@ -578,6 +674,7 @@ router.put('/:id', async (req, res) => {
         );
       }
       
+      // Parent Aadhar Back
       if (documents.parent_aadhar_back && documents.parent_aadhar_back !== existingStudent.documents?.parent_aadhar_back) {
         if (existingStudent.documents?.parent_aadhar_back) {
           await deleteFromCloudinary(existingStudent.documents.parent_aadhar_back);
@@ -595,7 +692,7 @@ router.put('/:id', async (req, res) => {
       classType = 'custom';
     }
     
-    // Calculate total amount from all fee components
+    // Calculate total amount from all fee components with discount
     const regFee = parseFloat(registration_fee) !== undefined ? parseFloat(registration_fee) : existingStudent.registration_fee || 0;
     const admFee = parseFloat(admission_fee) !== undefined ? parseFloat(admission_fee) : existingStudent.admission_fee || 0;
     const tuiFee = parseFloat(tuition_fee) !== undefined ? parseFloat(tuition_fee) : existingStudent.tuition_fee || 0;
@@ -603,7 +700,9 @@ router.put('/:id', async (req, res) => {
     const kitFee = parseFloat(kit_fee) !== undefined ? parseFloat(kit_fee) : existingStudent.kit_fee || 0;
     const cabFee = parseFloat(cab_fee) !== undefined ? parseFloat(cab_fee) : existingStudent.cab_fee || 0;
     const camFee = parseFloat(camera_fee) !== undefined ? parseFloat(camera_fee) : existingStudent.camera_fee || 0;
-    const totalAmount = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
+    const disc = parseFloat(discount) !== undefined ? parseFloat(discount) : existingStudent.discount || 0;
+    const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
+    const totalAmount = Math.max(0, subtotal - disc);
     
     const studentData = {
       name,
@@ -620,11 +719,16 @@ router.put('/:id', async (req, res) => {
       parent_phone,
       parent_aadhar: parent_aadhar || '',
       address,
-      emergency_contact,
+      emergency_contact: emergency_contact ? {
+        name: emergency_contact.name,
+        relationship: emergency_contact.relationship,
+        phone: emergency_contact.phone,
+      } : existingStudent.emergency_contact,
       medical_info: medical_info || '',
       enrollment_date: new Date(enrollment_date),
       transport_type: transport_type || 'Walker',
-      vehicle_id: transport_type === 'Cab' ? vehicle_id : null,
+      vehicle_id: transport_type !== 'Walker' ? vehicle_id : null,
+      vendor_id: transport_type !== 'Walker' ? vendor_id : null,
       status: status || 'Active',
       documents: updatedDocuments,
       registration_fee: regFee,
@@ -634,12 +738,25 @@ router.put('/:id', async (req, res) => {
       kit_fee: kitFee,
       cab_fee: cabFee,
       camera_fee: camFee,
+      fee_frequency: fee_frequency || existingStudent.fee_frequency || 'Monthly',
+      discount: disc,
       total_amount: totalAmount,
       fee_paid: fee_paid !== undefined ? fee_paid : existingStudent.fee_paid,
       payment_date: payment_date ? new Date(payment_date) : existingStudent.payment_date,
       payment_mode: payment_mode || existingStudent.payment_mode || 'Cash',
       updated_at: Date.now(),
     };
+    
+    // Add authorized pickup only if Walker
+    if (transport_type === 'Walker' && authorized_pickup) {
+      studentData.authorized_pickup = {
+        name: authorized_pickup.name || '',
+        relationship: authorized_pickup.relationship || '',
+        phone: authorized_pickup.phone || '',
+      };
+    } else {
+      studentData.authorized_pickup = null;
+    }
     
     const student = await Student.findByIdAndUpdate(
       id,
@@ -673,14 +790,29 @@ router.put('/:id', async (req, res) => {
 router.patch('/:id/fee', async (req, res) => {
   try {
     const { id } = req.params;
-    const { fee_paid, payment_date, payment_mode } = req.body;
+    const { fee_paid, payment_date, payment_mode, discount, fee_frequency } = req.body;
     
     const student = await Student.findById(id);
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
     }
     
-    student.fee_paid = fee_paid !== undefined ? fee_paid : student.fee_paid;
+    // Update fee fields
+    if (fee_paid !== undefined) student.fee_paid = fee_paid;
+    if (discount !== undefined) student.discount = parseFloat(discount) || 0;
+    if (fee_frequency) student.fee_frequency = fee_frequency;
+    
+    // Recalculate total with discount
+    const subtotal = 
+      (student.registration_fee || 0) + 
+      (student.admission_fee || 0) + 
+      (student.tuition_fee || 0) + 
+      (student.activity_fee || 0) + 
+      (student.kit_fee || 0) + 
+      (student.cab_fee || 0) + 
+      (student.camera_fee || 0);
+    student.total_amount = Math.max(0, subtotal - (student.discount || 0));
+    
     if (fee_paid) {
       student.payment_date = payment_date ? new Date(payment_date) : new Date();
     } else {
@@ -699,6 +831,9 @@ router.patch('/:id/fee', async (req, res) => {
           status: fee_paid ? 'Paid' : 'Pending',
           payment_date: student.payment_date,
           payment_method: student.payment_mode,
+          discount: student.discount,
+          fee_frequency: student.fee_frequency,
+          total_amount: student.total_amount,
           updated_at: Date.now()
         });
         console.log(`💰 Fee status updated for ${student.name} in finance module`);
@@ -735,6 +870,9 @@ router.delete('/:id', async (req, res) => {
     
     // Delete all associated documents from Cloudinary
     if (student.documents) {
+      if (student.documents.student_photo) {
+        await deleteFromCloudinary(student.documents.student_photo);
+      }
       if (student.documents.birth_certificate) {
         await deleteFromCloudinary(student.documents.birth_certificate);
       }
@@ -799,10 +937,15 @@ router.post('/sync-to-mobile', async (req, res) => {
       kit_fee: student.kit_fee || 0,
       cab_fee: student.cab_fee || 0,
       camera_fee: student.camera_fee || 0,
+      fee_frequency: student.fee_frequency || 'Monthly',
+      discount: student.discount || 0,
       total_amount: student.total_amount || 0,
       fee_paid: student.fee_paid || false,
       payment_date: student.payment_date || null,
       payment_mode: student.payment_mode || 'Cash',
+      emergency_contact: student.emergency_contact || {},
+      authorized_pickup: student.authorized_pickup || {},
+      documents: student.documents || {},
     }));
     
     if (!process.env.MOBILE_BACKEND_URL) {
@@ -911,8 +1054,6 @@ router.post('/sync-fees-to-finance', async (req, res) => {
 });
 
 // ==================== PROMOTE ALL STUDENTS TO NEXT CLASS ====================
-// Class progression ladder for this school. KG-1 is the terminal class —
-// students there move to status "Graduated" instead of a new class_id.
 const CLASS_PROGRESSION = {
   'toddler': 'pre-nursery',
   'pre-nursery': 'nursery',
@@ -924,8 +1065,6 @@ router.post('/promote-all', async (req, res) => {
   try {
     const { academic_year } = req.body;
 
-    // Only currently Active students are eligible — Inactive/Graduated
-    // students are left untouched.
     const students = await Student.find({ status: 'Active' });
 
     const results = { promoted: 0, graduated: 0, skipped: 0, details: [] };
@@ -933,8 +1072,6 @@ router.post('/promote-all', async (req, res) => {
     for (const student of students) {
       const currentClass = student.class_id;
 
-      // Students with no class or a non-standard/custom class_id can't be
-      // auto-promoted — skip them so an admin can handle them manually.
       if (!currentClass || !(currentClass in CLASS_PROGRESSION)) {
         results.skipped++;
         continue;
@@ -944,7 +1081,6 @@ router.post('/promote-all', async (req, res) => {
       student.promotion_history = student.promotion_history || [];
 
       if (nextClass === null) {
-        // Top of the ladder — graduate the student
         student.status = 'Graduated';
         student.promotion_history.push({
           from_class: currentClass,
