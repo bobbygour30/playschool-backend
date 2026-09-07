@@ -65,11 +65,8 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         fee_paid: studentData.fee_paid || false,
         payment_date: studentData.payment_date || null,
         payment_mode: studentData.payment_mode || 'Cash',
-        // Emergency Contact
         emergency_contact: studentData.emergency_contact || {},
-        // Authorized Pickup
-        authorized_pickup: studentData.authorized_pickup || {},
-        // Documents
+        authorized_pickup: studentData.authorized_pickup || null,
         documents: studentData.documents || {},
       };
       
@@ -94,12 +91,10 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
 // Helper function to sync student fees to finance module
 const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
   try {
-    // Check if fee record already exists for this student
     let existingFee = await Fee.findOne({ 
       student_id: studentData._id 
     });
     
-    // Calculate total fee from all components with discount
     const subtotal = 
       (studentData.registration_fee || 0) + 
       (studentData.admission_fee || 0) + 
@@ -130,7 +125,6 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
     };
     
     if (existingFee) {
-      // Update existing fee record
       const updatedFee = await Fee.findByIdAndUpdate(
         existingFee._id,
         { 
@@ -141,7 +135,6 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       );
       return { success: true, data: updatedFee, action: 'updated' };
     } else {
-      // Create new fee record
       const newFee = new Fee(feeData);
       await newFee.save();
       return { success: true, data: newFee, action: 'created' };
@@ -405,8 +398,9 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Emergency Contact phone must be exactly 10 digits' });
     }
     
-    // Validate authorized pickup if Walker
+    // Validate authorized pickup if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
+      // Only validate phone if it's provided
       if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
         return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
       }
@@ -516,19 +510,23 @@ router.post('/', async (req, res) => {
       payment_mode: payment_mode || 'Cash',
     };
     
-    // Add authorized pickup only if Walker
+    // Add authorized pickup only if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
-      studentData.authorized_pickup = {
-        name: authorized_pickup.name || '',
-        relationship: authorized_pickup.relationship || '',
-        phone: authorized_pickup.phone || '',
-      };
+      // Only set if there's at least one field with value
+      const hasPickupData = authorized_pickup.name || authorized_pickup.relationship || authorized_pickup.phone;
+      if (hasPickupData) {
+        studentData.authorized_pickup = {
+          name: authorized_pickup.name || null,
+          relationship: authorized_pickup.relationship || null,
+          phone: authorized_pickup.phone || null,
+        };
+      }
     }
     
     const student = new Student(studentData);
     const savedStudent = await student.save();
     
-    // Sync student fees to finance module (AUTOMATIC)
+    // Sync student fees to finance module
     const feeSyncResult = await syncStudentFeesToFinance(savedStudent, false);
     console.log(`💰 Fee sync result for ${savedStudent.name}: ${feeSyncResult.action}`);
     
@@ -619,7 +617,7 @@ router.put('/:id', async (req, res) => {
       }
     }
     
-    // Validate authorized pickup if Walker
+    // Validate authorized pickup if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
       if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
         return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
@@ -630,7 +628,6 @@ router.put('/:id', async (req, res) => {
     const updatedDocuments = { ...existingStudent.documents };
     
     if (documents) {
-      // Student Photo
       if (documents.student_photo && documents.student_photo !== existingStudent.documents?.student_photo) {
         if (existingStudent.documents?.student_photo) {
           await deleteFromCloudinary(existingStudent.documents.student_photo);
@@ -640,8 +637,6 @@ router.put('/:id', async (req, res) => {
           'students/photos'
         );
       }
-      
-      // Birth Certificate
       if (documents.birth_certificate && documents.birth_certificate !== existingStudent.documents?.birth_certificate) {
         if (existingStudent.documents?.birth_certificate) {
           await deleteFromCloudinary(existingStudent.documents.birth_certificate);
@@ -651,8 +646,6 @@ router.put('/:id', async (req, res) => {
           'students/birth_certificates'
         );
       }
-      
-      // Aadhar Card
       if (documents.aadhar_card && documents.aadhar_card !== existingStudent.documents?.aadhar_card) {
         if (existingStudent.documents?.aadhar_card) {
           await deleteFromCloudinary(existingStudent.documents.aadhar_card);
@@ -662,8 +655,6 @@ router.put('/:id', async (req, res) => {
           'students/aadhar_cards'
         );
       }
-      
-      // Parent Aadhar Front
       if (documents.parent_aadhar_front && documents.parent_aadhar_front !== existingStudent.documents?.parent_aadhar_front) {
         if (existingStudent.documents?.parent_aadhar_front) {
           await deleteFromCloudinary(existingStudent.documents.parent_aadhar_front);
@@ -673,8 +664,6 @@ router.put('/:id', async (req, res) => {
           'students/parent_aadhar'
         );
       }
-      
-      // Parent Aadhar Back
       if (documents.parent_aadhar_back && documents.parent_aadhar_back !== existingStudent.documents?.parent_aadhar_back) {
         if (existingStudent.documents?.parent_aadhar_back) {
           await deleteFromCloudinary(existingStudent.documents.parent_aadhar_back);
@@ -747,13 +736,18 @@ router.put('/:id', async (req, res) => {
       updated_at: Date.now(),
     };
     
-    // Add authorized pickup only if Walker
+    // Add authorized pickup only if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
-      studentData.authorized_pickup = {
-        name: authorized_pickup.name || '',
-        relationship: authorized_pickup.relationship || '',
-        phone: authorized_pickup.phone || '',
-      };
+      const hasPickupData = authorized_pickup.name || authorized_pickup.relationship || authorized_pickup.phone;
+      if (hasPickupData) {
+        studentData.authorized_pickup = {
+          name: authorized_pickup.name || null,
+          relationship: authorized_pickup.relationship || null,
+          phone: authorized_pickup.phone || null,
+        };
+      } else {
+        studentData.authorized_pickup = null;
+      }
     } else {
       studentData.authorized_pickup = null;
     }
@@ -768,7 +762,7 @@ router.put('/:id', async (req, res) => {
       select: 'name designation email phone role'
     });
     
-    // Sync student fees to finance module (AUTOMATIC)
+    // Sync student fees to finance module
     const feeSyncResult = await syncStudentFeesToFinance(student, true);
     console.log(`💰 Fee sync result for ${student.name}: ${feeSyncResult.action}`);
     
@@ -797,12 +791,10 @@ router.patch('/:id/fee', async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
     
-    // Update fee fields
     if (fee_paid !== undefined) student.fee_paid = fee_paid;
     if (discount !== undefined) student.discount = parseFloat(discount) || 0;
     if (fee_frequency) student.fee_frequency = fee_frequency;
     
-    // Recalculate total with discount
     const subtotal = 
       (student.registration_fee || 0) + 
       (student.admission_fee || 0) + 
@@ -823,7 +815,6 @@ router.patch('/:id/fee', async (req, res) => {
     
     await student.save();
     
-    // Update fee record in finance module (AUTOMATIC)
     try {
       const existingFee = await Fee.findOne({ student_id: student._id });
       if (existingFee) {
@@ -838,7 +829,6 @@ router.patch('/:id/fee', async (req, res) => {
         });
         console.log(`💰 Fee status updated for ${student.name} in finance module`);
       } else {
-        // If no fee record exists, create one (sync all fees)
         await syncStudentFeesToFinance(student, false);
         console.log(`💰 New fee record created for ${student.name} in finance module`);
       }
@@ -846,7 +836,6 @@ router.patch('/:id/fee', async (req, res) => {
       console.error('Error updating fee in finance module:', feeError.message);
     }
     
-    // Sync to mobile backend
     const syncResult = await syncStudentToMobile(student);
     
     const responseData = student.toObject();
@@ -868,7 +857,6 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
     
-    // Delete all associated documents from Cloudinary
     if (student.documents) {
       if (student.documents.student_photo) {
         await deleteFromCloudinary(student.documents.student_photo);
@@ -887,7 +875,6 @@ router.delete('/:id', async (req, res) => {
       }
     }
     
-    // Delete associated fee record from finance module
     try {
       const feeRecord = await Fee.findOne({ student_id: student._id });
       if (feeRecord) {
@@ -898,7 +885,6 @@ router.delete('/:id', async (req, res) => {
       console.error('Error deleting fee record:', feeError.message);
     }
     
-    // Sync deletion to mobile backend
     await syncStudentToMobile(student, true);
     
     await Student.findByIdAndDelete(req.params.id);
@@ -944,7 +930,7 @@ router.post('/sync-to-mobile', async (req, res) => {
       payment_date: student.payment_date || null,
       payment_mode: student.payment_mode || 'Cash',
       emergency_contact: student.emergency_contact || {},
-      authorized_pickup: student.authorized_pickup || {},
+      authorized_pickup: student.authorized_pickup || null,
       documents: student.documents || {},
     }));
     
@@ -1009,7 +995,7 @@ router.post('/:id/sync-to-mobile', async (req, res) => {
   }
 });
 
-// ==================== SYNC ALL STUDENT FEES TO FINANCE (Manual backfill) ====================
+// ==================== SYNC ALL STUDENT FEES TO FINANCE ====================
 router.post('/sync-fees-to-finance', async (req, res) => {
   try {
     const students = await Student.find();
@@ -1058,7 +1044,7 @@ const CLASS_PROGRESSION = {
   'toddler': 'pre-nursery',
   'pre-nursery': 'nursery',
   'nursery': 'kg-1',
-  'kg-1': null, // null = graduates, doesn't move to another class
+  'kg-1': null,
 };
 
 router.post('/promote-all', async (req, res) => {

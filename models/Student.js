@@ -51,7 +51,7 @@ const studentSchema = new mongoose.Schema({
   },
   parent_relationship: {
     type: String,
-    enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling'],
+    enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other'],
     default: 'Mother',
   },
   parent_email: {
@@ -73,7 +73,7 @@ const studentSchema = new mongoose.Schema({
     required: true,
   },
   
-  // ==================== EMERGENCY CONTACT (New) ====================
+  // ==================== EMERGENCY CONTACT ====================
   emergency_contact: {
     name: {
       type: String,
@@ -107,7 +107,7 @@ const studentSchema = new mongoose.Schema({
     default: 'Active',
   },
   
-  // ==================== FEE AND CHARGES (Updated) ====================
+  // ==================== FEE AND CHARGES ====================
   registration_fee: {
     type: Number,
     default: 0,
@@ -185,21 +185,21 @@ const studentSchema = new mongoose.Schema({
   authorized_pickup: {
     name: {
       type: String,
-      default: '',
+      default: null,
     },
     relationship: {
       type: String,
-      enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other'],
-      default: '',
+      enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other', ''],
+      default: null,
     },
     phone: {
       type: String,
-      default: '',
+      default: null,
       match: /^\d{10}$/,
     },
   },
   
-  // ==================== DOCUMENTS (Updated with Student Photo) ====================
+  // ==================== DOCUMENTS ====================
   documents: {
     student_photo: {
       type: String,
@@ -227,8 +227,7 @@ const studentSchema = new mongoose.Schema({
     },
   },
   
-  // Promotion audit trail — records every class change made by the
-  // "Promote Students" bulk action, for history/reporting purposes.
+  // Promotion audit trail
   promotion_history: [{
     from_class: { type: String, default: '' },
     to_class: { type: String, default: '' },
@@ -312,6 +311,21 @@ studentSchema.pre('save', function(next) {
   if (this.attendance.total_days > 0) {
     this.attendance.attendance_percentage = 
       (this.attendance.present_days / this.attendance.total_days) * 100;
+  }
+  
+  // Clean up authorized_pickup - if transport is not Walker, set to null
+  if (this.transport_type !== 'Walker') {
+    this.authorized_pickup = null;
+  }
+  
+  // If authorized_pickup exists and all fields are empty/null, set to null
+  if (this.authorized_pickup) {
+    const hasAnyValue = this.authorized_pickup.name || 
+                        this.authorized_pickup.relationship || 
+                        this.authorized_pickup.phone;
+    if (!hasAnyValue) {
+      this.authorized_pickup = null;
+    }
   }
   
   next();
