@@ -68,6 +68,11 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         emergency_contact: studentData.emergency_contact || {},
         authorized_pickup: studentData.authorized_pickup || null,
         documents: studentData.documents || {},
+        // Enrollment fields
+        admission_date: studentData.admission_date || null,
+        academic_year: studentData.academic_year || '',
+        enrollment_type: studentData.enrollment_type || 'New Admission',
+        previous_class: studentData.previous_class || '',
       };
       
       const response = await axios.post(
@@ -356,6 +361,10 @@ router.post('/', async (req, res) => {
       emergency_contact,
       medical_info,
       enrollment_date,
+      admission_date,
+      academic_year,
+      enrollment_type,
+      previous_class,
       transport_type,
       vehicle_id,
       vendor_id,
@@ -396,6 +405,24 @@ router.post('/', async (req, res) => {
     }
     if (!/^\d{10}$/.test(emergency_contact.phone)) {
       return res.status(400).json({ message: 'Emergency Contact phone must be exactly 10 digits' });
+    }
+    
+    // Validate enrollment information
+    if (!admission_date) {
+      return res.status(400).json({ message: 'Admission Date is required' });
+    }
+    if (!academic_year) {
+      return res.status(400).json({ message: 'Academic Year is required' });
+    }
+    if (!enrollment_type) {
+      return res.status(400).json({ message: 'Enrollment Type is required' });
+    }
+    
+    // Validate previous class for Transfer or Returning
+    if ((enrollment_type === 'Transfer' || enrollment_type === 'Returning') && !previous_class) {
+      return res.status(400).json({ 
+        message: 'Previous Class is required for Transfer or Returning students' 
+      });
     }
     
     // Validate authorized pickup if Walker and has data
@@ -490,6 +517,11 @@ router.post('/', async (req, res) => {
       },
       medical_info: medical_info || '',
       enrollment_date: new Date(enrollment_date),
+      // Enrollment fields
+      admission_date: new Date(admission_date),
+      academic_year: academic_year,
+      enrollment_type: enrollment_type || 'New Admission',
+      previous_class: previous_class || '',
       transport_type: transport_type || 'Walker',
       vehicle_id: transport_type !== 'Walker' ? vehicle_id : null,
       vendor_id: transport_type !== 'Walker' ? vendor_id : null,
@@ -579,6 +611,10 @@ router.put('/:id', async (req, res) => {
       emergency_contact,
       medical_info,
       enrollment_date,
+      admission_date,
+      academic_year,
+      enrollment_type,
+      previous_class,
       transport_type,
       vehicle_id,
       vendor_id,
@@ -615,6 +651,18 @@ router.put('/:id', async (req, res) => {
       if (!/^\d{10}$/.test(emergency_contact.phone)) {
         return res.status(400).json({ message: 'Emergency Contact phone must be exactly 10 digits' });
       }
+    }
+    
+    // Validate enrollment information
+    if (admission_date && !academic_year) {
+      return res.status(400).json({ message: 'Academic Year is required when Admission Date is provided' });
+    }
+    
+    // Validate previous class for Transfer or Returning
+    if ((enrollment_type === 'Transfer' || enrollment_type === 'Returning') && !previous_class) {
+      return res.status(400).json({ 
+        message: 'Previous Class is required for Transfer or Returning students' 
+      });
     }
     
     // Validate authorized pickup if Walker and has data
@@ -715,6 +763,11 @@ router.put('/:id', async (req, res) => {
       } : existingStudent.emergency_contact,
       medical_info: medical_info || '',
       enrollment_date: new Date(enrollment_date),
+      // Enrollment fields
+      admission_date: admission_date ? new Date(admission_date) : existingStudent.admission_date,
+      academic_year: academic_year || existingStudent.academic_year,
+      enrollment_type: enrollment_type || existingStudent.enrollment_type || 'New Admission',
+      previous_class: previous_class !== undefined ? previous_class : existingStudent.previous_class || '',
       transport_type: transport_type || 'Walker',
       vehicle_id: transport_type !== 'Walker' ? vehicle_id : null,
       vendor_id: transport_type !== 'Walker' ? vendor_id : null,
@@ -932,6 +985,10 @@ router.post('/sync-to-mobile', async (req, res) => {
       emergency_contact: student.emergency_contact || {},
       authorized_pickup: student.authorized_pickup || null,
       documents: student.documents || {},
+      admission_date: student.admission_date || null,
+      academic_year: student.academic_year || '',
+      enrollment_type: student.enrollment_type || 'New Admission',
+      previous_class: student.previous_class || '',
     }));
     
     if (!process.env.MOBILE_BACKEND_URL) {

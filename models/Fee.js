@@ -43,13 +43,23 @@ const feeSchema = new mongoose.Schema({
     default: 0,
   },
   
+  // Payment tracking
+  paid_amount: {
+    type: Number,
+    default: 0,
+  },
+  remaining_amount: {
+    type: Number,
+    default: 0,
+  },
+  
   due_date: {
     type: Date,
     required: true,
   },
   status: {
     type: String,
-    enum: ['Pending', 'Paid', 'Overdue'],
+    enum: ['Pending', 'Paid', 'Overdue', 'Partial'],
     default: 'Pending',
   },
   
@@ -68,6 +78,45 @@ const feeSchema = new mongoose.Schema({
     default: '',
   },
   
+  // Payment history
+  payment_history: [{
+    amount: {
+      type: Number,
+      required: true,
+    },
+    payment_date: {
+      type: Date,
+      default: Date.now,
+    },
+    payment_method: {
+      type: String,
+      enum: ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Cheque'],
+      required: true,
+    },
+    transaction_id: {
+      type: String,
+      default: '',
+    },
+    payment_type: {
+      type: String,
+      enum: ['full', 'partial', 'advance'],
+      required: true,
+    },
+    notes: {
+      type: String,
+      default: '',
+    },
+    recorded_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    recorded_at: {
+      type: Date,
+      default: Date.now,
+    },
+  }],
+  
   // Additional info
   notes: {
     type: String,
@@ -78,12 +127,6 @@ const feeSchema = new mongoose.Schema({
     default: null,
   },
   
-  // Audit fields - Comment out or remove if User model doesn't exist
-  // created_by: {
-  //   type: mongoose.Schema.Types.ObjectId,
-  //   ref: 'User',
-  //   default: null,
-  // },
   created_at: {
     type: Date,
     default: Date.now,
@@ -98,9 +141,10 @@ const feeSchema = new mongoose.Schema({
 feeSchema.index({ student_id: 1, due_date: -1 });
 feeSchema.index({ status: 1 });
 
-// Update timestamp on save
+// Update timestamp and calculate totals on save
 feeSchema.pre('save', function(next) {
   this.updated_at = Date.now();
+  
   // Auto-calculate total amount
   this.total_amount = 
     (this.registration_fee || 0) + 
@@ -110,7 +154,50 @@ feeSchema.pre('save', function(next) {
     (this.kit_fee || 0) + 
     (this.transport_fee || 0) + 
     (this.camera_fee || 0);
+  
+  // Calculate remaining amount
+  this.remaining_amount = this.total_amount - (this.paid_amount || 0);
+  
+  // Update status based on payment
+  if (this.remaining_amount <= 0) {
+    this.status = 'Paid';
+  } else if (this.paid_amount > 0 && this.remaining_amount > 0) {
+    this.status = 'Partial';
+  }
+  
   next();
 });
+
+// Method to record a payment
+feeSchema.methods.recordPayment = function(paymentData) {
+  const { amount, payment_method, transaction_id, payment_type, notes, recorded_by } = paymentData;
+  
+  // Add to payment history
+  this.payment_history.push({
+    amount,
+    payment_date: new Date(),
+    payment_method,
+    transaction_id: transaction_id || '',
+    payment_type,
+    notes: notes || '',
+    recorded_by: recorded_by || null,
+  });
+  
+  // Update paid amount
+  this.paid_amount = (this.paid_amount || 0) + amount;
+  this.remaining_amount = this.total_amount - this.paid_amount;
+  
+  // Update status
+  if (this.remaining_amount <= 0) {
+    this.status = 'Paid';
+    this.payment_date = new Date();
+    this.payment_method = payment_method;
+    this.transaction_id = transaction_id || '';
+  } else if (this.paid_amount > 0) {
+    this.status = 'Partial';
+  }
+  
+  return this.save();
+};
 
 module.exports = mongoose.model('Fee', feeSchema);

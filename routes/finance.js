@@ -29,8 +29,6 @@ router.get('/fees', async (req, res) => {
     
     const fees = await Fee.find(query)
       .populate('student_id', 'name parent_name parent_phone class_id')
-      // Remove created_by population or comment it out
-      // .populate('created_by', 'name email')
       .sort({ due_date: 1 });
     
     res.json(fees);
@@ -44,9 +42,7 @@ router.get('/fees', async (req, res) => {
 router.get('/fees/:id', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id)
-      .populate('student_id', 'name parent_name parent_phone class_id')
-      // Remove created_by population or comment it out
-      // .populate('created_by', 'name email');
+      .populate('student_id', 'name parent_name parent_phone class_id');
     
     if (!fee) {
       return res.status(404).json({ message: 'Fee record not found' });
@@ -111,6 +107,124 @@ router.get('/fees/student/:studentId', async (req, res) => {
   }
 });
 
+// ==================== PAYMENT RECORDING ====================
+
+// Record a payment against a fee
+router.post('/fees/record-payment', async (req, res) => {
+  try {
+    const {
+      student_id,
+      fee_id,
+      amount_paid,
+      payment_date,
+      payment_type,
+      payment_method,
+      transaction_no,
+      notes,
+      recorded_by,
+    } = req.body;
+
+    // Validate required fields
+    if (!fee_id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Fee record ID is required' 
+      });
+    }
+
+    if (!amount_paid || amount_paid <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Valid payment amount is required' 
+      });
+    }
+
+    // Find the fee record
+    const fee = await Fee.findById(fee_id);
+    if (!fee) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Fee record not found' 
+      });
+    }
+
+    // Check if amount exceeds remaining balance
+    const remaining = fee.total_amount - (fee.paid_amount || 0);
+    if (amount_paid > remaining && payment_type !== 'advance') {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Amount exceeds remaining balance of ₹${remaining}. Please use advance payment for overpayment.` 
+      });
+    }
+
+    // Record the payment
+    const paymentData = {
+      amount: amount_paid,
+      payment_date: payment_date ? new Date(payment_date) : new Date(),
+      payment_method: payment_method || 'Cash',
+      transaction_id: transaction_no || '',
+      payment_type: payment_type || 'full',
+      notes: notes || '',
+      recorded_by: recorded_by || null,
+    };
+
+    await fee.recordPayment(paymentData);
+
+    // Populate student info for response
+    const updatedFee = await Fee.findById(fee_id)
+      .populate('student_id', 'name parent_name class_id');
+
+    res.status(201).json({
+      success: true,
+      message: 'Payment recorded successfully',
+      data: updatedFee,
+    });
+
+  } catch (error) {
+    console.error('Error recording payment:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// Get payment history for a fee
+router.get('/fees/:id/payments', async (req, res) => {
+  try {
+    const fee = await Fee.findById(req.params.id)
+      .populate('student_id', 'name parent_name class_id')
+      .select('payment_history student_id total_amount paid_amount remaining_amount status');
+
+    if (!fee) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Fee record not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        student: fee.student_id,
+        total_amount: fee.total_amount,
+        paid_amount: fee.paid_amount,
+        remaining_amount: fee.remaining_amount,
+        status: fee.status,
+        payment_history: fee.payment_history.sort((a, b) => b.recorded_at - a.recorded_at),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching payment history:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// ==================== FEE CRUD ====================
+
 // Create fee record
 router.post('/fees', async (req, res) => {
   try {
@@ -131,7 +245,6 @@ router.post('/fees', async (req, res) => {
       transaction_id,
       notes,
       receipt_url,
-      created_by,
     } = req.body;
     
     // Check if student exists
@@ -166,6 +279,8 @@ router.post('/fees', async (req, res) => {
       kit_fee: kit_fee || 0,
       camera_fee: camera_fee || 0,
       total_amount: calculatedTotal,
+      paid_amount: 0,
+      remaining_amount: calculatedTotal,
       due_date: new Date(due_date),
       status: status || 'Pending',
       payment_date: payment_date ? new Date(payment_date) : null,
@@ -173,8 +288,6 @@ router.post('/fees', async (req, res) => {
       transaction_id: transaction_id || '',
       notes: notes || '',
       receipt_url: uploadedReceipt,
-      // Don't set created_by if it might cause issues
-      // created_by: created_by || null,
     };
     
     const fee = new Fee(feeData);
@@ -182,8 +295,6 @@ router.post('/fees', async (req, res) => {
     
     const populatedFee = await Fee.findById(savedFee._id)
       .populate('student_id', 'name parent_name');
-    // Remove created_by population
-    // .populate('created_by', 'name email');
     
     res.status(201).json(populatedFee);
   } catch (error) {
@@ -263,8 +374,6 @@ router.put('/fees/:id', async (req, res) => {
       feeData,
       { new: true, runValidators: true }
     ).populate('student_id', 'name parent_name');
-    // Remove created_by population
-    // .populate('created_by', 'name email');
     
     res.json(fee);
   } catch (error) {
@@ -313,9 +422,6 @@ router.get('/expenses', async (req, res) => {
     }
     
     const expenses = await Expense.find(query)
-      // Remove created_by and approved_by populations
-      // .populate('created_by', 'name email')
-      // .populate('approved_by', 'name email')
       .sort({ date: -1 });
     
     res.json(expenses);
@@ -329,9 +435,6 @@ router.get('/expenses', async (req, res) => {
 router.get('/expenses/:id', async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
-      // Remove created_by and approved_by populations
-      // .populate('created_by', 'name email')
-      // .populate('approved_by', 'name email');
     
     if (!expense) {
       return res.status(404).json({ message: 'Expense not found' });
@@ -356,9 +459,7 @@ router.post('/expenses', async (req, res) => {
       bill_number,
       payment_mode,
       receipt_url,
-      approved_by,
       notes,
-      created_by,
     } = req.body;
     
     // Upload receipt if provided
@@ -376,19 +477,13 @@ router.post('/expenses', async (req, res) => {
       bill_number: bill_number || '',
       payment_mode: payment_mode || 'Cash',
       receipt_url: uploadedReceipt,
-      // approved_by: approved_by || null,
       notes: notes || '',
-      // created_by: created_by || null,
     };
     
     const expense = new Expense(expenseData);
     const savedExpense = await expense.save();
     
-    const populatedExpense = await Expense.findById(savedExpense._id);
-      // Remove population
-      // .populate('created_by', 'name email');
-    
-    res.status(201).json(populatedExpense);
+    res.status(201).json(savedExpense);
   } catch (error) {
     console.error('Error creating expense:', error);
     res.status(400).json({ message: error.message });
@@ -414,7 +509,6 @@ router.put('/expenses/:id', async (req, res) => {
       bill_number,
       payment_mode,
       receipt_url,
-      approved_by,
       notes,
     } = req.body;
     
@@ -436,7 +530,6 @@ router.put('/expenses/:id', async (req, res) => {
       bill_number: bill_number || '',
       payment_mode,
       receipt_url: uploadedReceipt,
-      // approved_by: approved_by || null,
       notes: notes || '',
       updated_at: Date.now(),
     };
@@ -446,8 +539,6 @@ router.put('/expenses/:id', async (req, res) => {
       expenseData,
       { new: true, runValidators: true }
     );
-    // Remove population
-    // .populate('created_by', 'name email');
     
     res.json(expense);
   } catch (error) {
@@ -501,8 +592,6 @@ router.get('/salaries', async (req, res) => {
     
     const salaries = await Salary.find(query)
       .populate('staff_id', 'name designation department')
-      // Remove created_by population
-      // .populate('created_by', 'name email')
       .sort({ month: -1 });
     
     res.json(salaries);
@@ -517,8 +606,6 @@ router.get('/salaries/:id', async (req, res) => {
   try {
     const salary = await Salary.findById(req.params.id)
       .populate('staff_id', 'name designation department salary account_number bank_name');
-      // Remove created_by population
-      // .populate('created_by', 'name email');
     
     if (!salary) {
       return res.status(404).json({ message: 'Salary record not found' });
@@ -561,7 +648,6 @@ router.post('/salaries', async (req, res) => {
       transaction_id,
       remarks,
       salary_slip_url,
-      created_by,
     } = req.body;
     
     // Check if staff exists
@@ -603,7 +689,6 @@ router.post('/salaries', async (req, res) => {
       transaction_id: transaction_id || '',
       remarks: remarks || '',
       salary_slip_url: uploadedSlip,
-      // created_by: created_by || null,
     };
     
     const salary = new Salary(salaryData);
@@ -611,8 +696,6 @@ router.post('/salaries', async (req, res) => {
     
     const populatedSalary = await Salary.findById(savedSalary._id)
       .populate('staff_id', 'name designation');
-      // Remove created_by population
-      // .populate('created_by', 'name email');
     
     res.status(201).json(populatedSalary);
   } catch (error) {
@@ -672,8 +755,6 @@ router.put('/salaries/:id', async (req, res) => {
       salaryData,
       { new: true, runValidators: true }
     ).populate('staff_id', 'name designation');
-    // Remove created_by population
-    // .populate('created_by', 'name email');
     
     res.json(salary);
   } catch (error) {

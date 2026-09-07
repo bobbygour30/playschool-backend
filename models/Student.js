@@ -101,6 +101,27 @@ const studentSchema = new mongoose.Schema({
     type: Date,
     required: true,
   },
+  
+  // ==================== ENROLLMENT INFORMATION ====================
+  admission_date: {
+    type: Date,
+    required: true,
+  },
+  academic_year: {
+    type: String,
+    required: true,
+  },
+  enrollment_type: {
+    type: String,
+    enum: ['New Admission', 'Transfer', 'Returning'],
+    required: true,
+    default: 'New Admission',
+  },
+  previous_class: {
+    type: String,
+    default: '',
+  },
+  
   status: {
     type: String,
     enum: ['Active', 'Inactive', 'Graduated'],
@@ -326,6 +347,12 @@ studentSchema.pre('save', function(next) {
     if (!hasAnyValue) {
       this.authorized_pickup = null;
     }
+  }
+  
+  // Set default academic_year if not provided
+  if (!this.academic_year) {
+    const currentYear = new Date().getFullYear();
+    this.academic_year = `${currentYear}-${currentYear + 1}`;
   }
   
   next();
@@ -725,5 +752,8 @@ studentSchema.index({ parent_phone: 1 });
 studentSchema.index({ parent_email: 1 });
 studentSchema.index({ 'emergency_contact.phone': 1 });
 studentSchema.index({ 'authorized_pickup.phone': 1 });
+studentSchema.index({ admission_date: 1 });
+studentSchema.index({ academic_year: 1 });
+studentSchema.index({ enrollment_type: 1 });
 
 module.exports = mongoose.model('Student', studentSchema);
