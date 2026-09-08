@@ -128,6 +128,79 @@ const studentSchema = new mongoose.Schema({
     default: 'Active',
   },
   
+  // ==================== RECURRING FEES ====================
+  recurring_fees: {
+    tuition_fee: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    activity_fee: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    transport_fee: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    total_monthly: {
+      type: Number,
+      default: 0,
+    },
+    start_month: {
+      type: String, // Format: YYYY-MM
+      default: null,
+    },
+    end_month: {
+      type: String, // Format: YYYY-MM
+      default: null,
+    },
+    fee_plan: {
+      type: String,
+      enum: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'],
+      default: 'Monthly',
+    },
+    last_generated_month: {
+      type: String, // Format: YYYY-MM
+      default: null,
+    },
+    auto_generate: {
+      type: Boolean,
+      default: true,
+    },
+    // Initial payment tracking
+    initial_payment: {
+      amount: {
+        type: Number,
+        default: 0,
+      },
+      paid: {
+        type: Boolean,
+        default: false,
+      },
+      payment_date: {
+        type: Date,
+        default: null,
+      },
+      payment_method: {
+        type: String,
+        enum: ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Cheque'],
+        default: 'Cash',
+      },
+      invoice_id: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Fee',
+        default: null,
+      },
+      transaction_id: {
+        type: String,
+        default: '',
+      },
+    },
+  },
+  
   // ==================== FEE AND CHARGES ====================
   registration_fee: {
     type: Number,
@@ -184,6 +257,46 @@ const studentSchema = new mongoose.Schema({
     enum: ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Cheque'],
     default: 'Cash',
   },
+  
+  // ==================== FEE PAYMENT HISTORY ====================
+  fee_payment_history: [{
+    amount: {
+      type: Number,
+      required: true,
+    },
+    date: {
+      type: Date,
+      default: Date.now,
+    },
+    method: {
+      type: String,
+      enum: ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Cheque'],
+      required: true,
+    },
+    invoice_number: {
+      type: String,
+      default: '',
+    },
+    invoice_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Fee',
+      default: null,
+    },
+    payment_type: {
+      type: String,
+      enum: ['full', 'partial', 'advance', 'initial'],
+      default: 'full',
+    },
+    notes: {
+      type: String,
+      default: '',
+    },
+    recorded_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+  }],
   
   // ==================== TRANSPORT INFORMATION ====================
   transport_type: {
@@ -328,6 +441,14 @@ studentSchema.pre('save', function(next) {
   
   this.total_amount = Math.max(0, subtotal - (this.discount || 0));
   
+  // Auto-calculate recurring fees total
+  if (this.recurring_fees) {
+    this.recurring_fees.total_monthly = 
+      (this.recurring_fees.tuition_fee || 0) + 
+      (this.recurring_fees.activity_fee || 0) + 
+      (this.recurring_fees.transport_fee || 0);
+  }
+  
   // Update attendance percentage
   if (this.attendance.total_days > 0) {
     this.attendance.attendance_percentage = 
@@ -353,6 +474,11 @@ studentSchema.pre('save', function(next) {
   if (!this.academic_year) {
     const currentYear = new Date().getFullYear();
     this.academic_year = `${currentYear}-${currentYear + 1}`;
+  }
+  
+  // Set default start month for recurring fees if not set
+  if (this.recurring_fees && !this.recurring_fees.start_month) {
+    this.recurring_fees.start_month = new Date().toISOString().slice(0, 7);
   }
   
   next();
@@ -381,6 +507,13 @@ studentSchema.pre('findOneAndUpdate', function(next) {
     const subtotal = reg + adm + tui + act + kit + cab + cam;
     update.total_amount = Math.max(0, subtotal - discount);
   }
+  
+  // Update recurring fees total
+  if (update.recurring_fees) {
+    const rf = update.recurring_fees;
+    rf.total_monthly = (rf.tuition_fee || 0) + (rf.activity_fee || 0) + (rf.transport_fee || 0);
+  }
+  
   next();
 });
 
@@ -584,6 +717,181 @@ studentSchema.methods.getAttendanceReport = function() {
   };
 };
 
+// ==================== FEE RELATED METHODS ====================
+
+// Get current month's fee breakdown
+studentSchema.methods.getCurrentMonthFee = function() {
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  return {
+    tuition_fee: this.recurring_fees?.tuition_fee || 0,
+    activity_fee: this.recurring_fees?.activity_fee || 0,
+    transport_fee: this.recurring_fees?.transport_fee || 0,
+    total: this.recurring_fees?.total_monthly || 0,
+    month: currentMonth,
+  };
+};
+
+// Get fee due for a specific month
+studentSchema.methods.getFeeForMonth = function(month) {
+  const Fee = mongoose.model('Fee');
+  return Fee.findOne({
+    student_id: this._id,
+    'fee_period.month': month,
+  });
+};
+
+// Get all fee invoices for student
+studentSchema.methods.getAllFees = function() {
+  const Fee = mongoose.model('Fee');
+  return Fee.find({ student_id: this._id }).sort({ due_date: -1 });
+};
+
+// Get fee summary for student
+studentSchema.methods.getFeeSummary = async function() {
+  const Fee = mongoose.model('Fee');
+  const fees = await Fee.find({ student_id: this._id });
+  
+  const summary = {
+    total_charged: 0,
+    total_paid: 0,
+    total_remaining: 0,
+    total_overdue: 0,
+    total_advance: 0,
+    invoices: fees.length,
+    paid_invoices: fees.filter(f => f.status === 'Paid').length,
+    pending_invoices: fees.filter(f => f.status === 'Pending' || f.status === 'Partial').length,
+    overdue_invoices: fees.filter(f => f.status === 'Overdue').length,
+  };
+  
+  fees.forEach(fee => {
+    summary.total_charged += fee.total_amount || 0;
+    summary.total_paid += fee.paid_amount || 0;
+    summary.total_remaining += fee.remaining_amount || 0;
+    summary.total_overdue += fee.overdue_amount || 0;
+    summary.total_advance += fee.advance_amount || 0;
+  });
+  
+  return summary;
+};
+
+// Record a fee payment
+studentSchema.methods.recordFeePayment = async function(paymentData) {
+  const { amount, method, invoice_number, invoice_id, payment_type, notes, recorded_by } = paymentData;
+  
+  this.fee_payment_history.push({
+    amount,
+    date: new Date(),
+    method,
+    invoice_number: invoice_number || '',
+    invoice_id: invoice_id || null,
+    payment_type: payment_type || 'full',
+    notes: notes || '',
+    recorded_by: recorded_by || null,
+  });
+  
+  await this.save();
+  return this.fee_payment_history[this.fee_payment_history.length - 1];
+};
+
+// Check if fee is fully paid for current month
+studentSchema.methods.isCurrentMonthFeePaid = async function() {
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const Fee = mongoose.model('Fee');
+  const fee = await Fee.findOne({
+    student_id: this._id,
+    'fee_period.month': currentMonth,
+  });
+  
+  if (!fee) return false;
+  return fee.status === 'Paid';
+};
+
+// Create initial invoice for student
+studentSchema.methods.createInitialInvoice = async function(paymentData) {
+  const Fee = mongoose.model('Fee');
+  const { amount, payment_date, payment_method, transaction_id, notes } = paymentData;
+  
+  // Check if initial invoice already exists
+  const existingInvoice = await Fee.findOne({
+    student_id: this._id,
+    status: 'Paid',
+    'notes': /Initial invoice/,
+  });
+  
+  if (existingInvoice) {
+    return { success: false, message: 'Initial invoice already exists', invoice: existingInvoice };
+  }
+  
+  // Calculate total recurring amount for the initial month
+  const monthlyTotal = this.recurring_fees?.total_monthly || 0;
+  const startMonth = this.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
+  
+  // Create the invoice
+  const invoiceData = {
+    student_id: this._id,
+    registration_fee: this.registration_fee || 0,
+    admission_fee: this.admission_fee || 0,
+    tuition_fee: this.recurring_fees?.tuition_fee || 0,
+    activity_fee: this.recurring_fees?.activity_fee || 0,
+    transport_fee: this.recurring_fees?.transport_fee || 0,
+    total_amount: amount || monthlyTotal,
+    due_date: new Date(),
+    status: 'Paid',
+    payment_date: payment_date ? new Date(payment_date) : new Date(),
+    payment_method: payment_method || 'Cash',
+    transaction_id: transaction_id || '',
+    notes: notes || `Initial invoice for ${this.name} - ${startMonth}`,
+    fee_period: {
+      start_date: new Date(startMonth + '-01'),
+      end_date: new Date(new Date(startMonth + '-01').setMonth(new Date(startMonth + '-01').getMonth() + 1) - 1),
+      month: startMonth,
+    },
+    fee_plan: this.recurring_fees?.fee_plan || 'Monthly',
+    is_recurring: true,
+    generated_for_month: startMonth,
+    paid_amount: amount || monthlyTotal,
+    remaining_amount: 0,
+    advance_amount: 0,
+    overdue_amount: 0,
+    recurring_fees: {
+      tuition_fee: this.recurring_fees?.tuition_fee || 0,
+      activity_fee: this.recurring_fees?.activity_fee || 0,
+      transport_fee: this.recurring_fees?.transport_fee || 0,
+      total_monthly: this.recurring_fees?.total_monthly || 0,
+    },
+  };
+  
+  const invoice = new Fee(invoiceData);
+  await invoice.save();
+  
+  // Record payment in student's payment history
+  await this.recordFeePayment({
+    amount: amount || monthlyTotal,
+    method: payment_method || 'Cash',
+    invoice_number: invoice.invoice_number,
+    invoice_id: invoice._id,
+    payment_type: 'initial',
+    notes: notes || `Initial payment for ${this.name}`,
+  });
+  
+  // Update student's recurring fees initial payment info
+  this.recurring_fees.initial_payment = {
+    amount: amount || monthlyTotal,
+    paid: true,
+    payment_date: payment_date ? new Date(payment_date) : new Date(),
+    payment_method: payment_method || 'Cash',
+    invoice_id: invoice._id,
+    transaction_id: transaction_id || '',
+  };
+  
+  // Update last generated month
+  this.recurring_fees.last_generated_month = startMonth;
+  
+  await this.save();
+  
+  return { success: true, invoice, message: 'Initial invoice created and marked as paid' };
+};
+
 // ==================== STATIC METHODS ====================
 
 // Get students by class with leave balances
@@ -711,6 +1019,29 @@ studentSchema.statics.resetLeaveBalances = async function(academicYear) {
   };
 };
 
+// Get students with recurring fees due for generation
+studentSchema.statics.getStudentsForRecurringFeeGeneration = async function(month) {
+  const targetMonth = month || new Date().toISOString().slice(0, 7);
+  
+  return await this.find({
+    status: 'Active',
+    'recurring_fees.auto_generate': true,
+    'recurring_fees.total_monthly': { $gt: 0 },
+    $or: [
+      { 'recurring_fees.last_generated_month': { $ne: targetMonth } },
+      { 'recurring_fees.last_generated_month': null },
+    ],
+    $or: [
+      { 'recurring_fees.start_month': { $lte: targetMonth } },
+      { 'recurring_fees.start_month': null },
+    ],
+    $or: [
+      { 'recurring_fees.end_month': { $gte: targetMonth } },
+      { 'recurring_fees.end_month': null },
+    ],
+  }).select('name class_id recurring_fees');
+};
+
 // ==================== VIRTUAL PROPERTIES ====================
 
 // Virtual for full name with class
@@ -738,6 +1069,17 @@ studentSchema.virtual('attendanceStatus').get(function() {
   return 'Needs Improvement';
 });
 
+// Virtual for fee status
+studentSchema.virtual('feeStatus').get(function() {
+  const total = this.total_amount || 0;
+  const paid = this.fee_paid ? total : 0;
+  
+  if (total === 0) return 'No Fee Configured';
+  if (paid >= total) return 'Fully Paid';
+  if (paid > 0) return 'Partial Paid';
+  return 'Unpaid';
+});
+
 // Ensure virtuals are included in JSON output
 studentSchema.set('toJSON', { virtuals: true });
 studentSchema.set('toObject', { virtuals: true });
@@ -755,5 +1097,7 @@ studentSchema.index({ 'authorized_pickup.phone': 1 });
 studentSchema.index({ admission_date: 1 });
 studentSchema.index({ academic_year: 1 });
 studentSchema.index({ enrollment_type: 1 });
+studentSchema.index({ 'recurring_fees.auto_generate': 1 });
+studentSchema.index({ 'recurring_fees.total_monthly': 1 });
 
 module.exports = mongoose.model('Student', studentSchema);

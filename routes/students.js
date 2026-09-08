@@ -68,11 +68,12 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         emergency_contact: studentData.emergency_contact || {},
         authorized_pickup: studentData.authorized_pickup || null,
         documents: studentData.documents || {},
-        // Enrollment fields
         admission_date: studentData.admission_date || null,
         academic_year: studentData.academic_year || '',
         enrollment_type: studentData.enrollment_type || 'New Admission',
         previous_class: studentData.previous_class || '',
+        // Recurring fees
+        recurring_fees: studentData.recurring_fees || {},
       };
       
       const response = await axios.post(
@@ -93,11 +94,108 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
   }
 };
 
+// Helper function to create initial fee invoice and payment record
+const createInitialFeeInvoice = async (studentData, paymentInfo) => {
+  try {
+    const Fee = require('../models/Fee');
+    
+    // Check if initial invoice already exists
+    const existingInvoice = await Fee.findOne({
+      student_id: studentData._id,
+      status: 'Paid',
+      'notes': /Initial invoice/,
+    });
+    
+    if (existingInvoice) {
+      return { success: false, message: 'Initial invoice already exists', invoice: existingInvoice };
+    }
+    
+    // Calculate monthly total from recurring fees
+    const monthlyTotal = (studentData.recurring_fees?.total_monthly || 0);
+    const amount = paymentInfo?.initial_payment_amount || monthlyTotal;
+    const paymentMethod = paymentInfo?.payment_mode || 'Cash';
+    const paymentDate = paymentInfo?.payment_date || new Date();
+    const transactionId = paymentInfo?.transaction_id || '';
+    const startMonth = studentData.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
+    
+    // Create the invoice
+    const invoiceData = {
+      student_id: studentData._id,
+      registration_fee: studentData.registration_fee || 0,
+      admission_fee: studentData.admission_fee || 0,
+      tuition_fee: studentData.recurring_fees?.tuition_fee || 0,
+      activity_fee: studentData.recurring_fees?.activity_fee || 0,
+      transport_fee: studentData.recurring_fees?.transport_fee || 0,
+      total_amount: amount,
+      due_date: new Date(),
+      status: 'Paid',
+      payment_date: paymentDate,
+      payment_method: paymentMethod,
+      transaction_id: transactionId,
+      notes: `Initial invoice for ${studentData.name} - ${startMonth}`,
+      fee_period: {
+        start_date: new Date(startMonth + '-01'),
+        end_date: new Date(new Date(startMonth + '-01').setMonth(new Date(startMonth + '-01').getMonth() + 1) - 1),
+        month: startMonth,
+      },
+      fee_plan: studentData.recurring_fees?.fee_plan || 'Monthly',
+      is_recurring: true,
+      generated_for_month: startMonth,
+      paid_amount: amount,
+      remaining_amount: 0,
+      advance_amount: 0,
+      overdue_amount: 0,
+      recurring_fees: {
+        tuition_fee: studentData.recurring_fees?.tuition_fee || 0,
+        activity_fee: studentData.recurring_fees?.activity_fee || 0,
+        transport_fee: studentData.recurring_fees?.transport_fee || 0,
+        total_monthly: studentData.recurring_fees?.total_monthly || 0,
+      },
+    };
+    
+    const invoice = new Fee(invoiceData);
+    await invoice.save();
+    
+    // Update student's fee_paid status
+    studentData.fee_paid = true;
+    studentData.payment_date = paymentDate;
+    studentData.payment_mode = paymentMethod;
+    studentData.total_amount = amount;
+    
+    // Update recurring fees initial payment info
+    studentData.recurring_fees.initial_payment = {
+      amount: amount,
+      paid: true,
+      payment_date: paymentDate,
+      payment_method: paymentMethod,
+      invoice_id: invoice._id,
+      transaction_id: transactionId,
+    };
+    
+    // Update last generated month
+    studentData.recurring_fees.last_generated_month = startMonth;
+    
+    await studentData.save();
+    
+    return { success: true, invoice, message: 'Initial invoice created and marked as paid' };
+  } catch (error) {
+    console.error('Error creating initial invoice:', error);
+    return { success: false, error: error.message };
+  }
+};
+
 // Helper function to sync student fees to finance module
 const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
   try {
     let existingFee = await Fee.findOne({ 
       student_id: studentData._id 
+    });
+    
+    // Check if there's already an initial invoice
+    const initialInvoice = await Fee.findOne({
+      student_id: studentData._id,
+      status: 'Paid',
+      'notes': /Initial invoice/,
     });
     
     const subtotal = 
@@ -109,6 +207,17 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       (studentData.cab_fee || 0) + 
       (studentData.camera_fee || 0);
     const totalAmount = Math.max(0, subtotal - (studentData.discount || 0));
+    
+    // If there's an initial invoice, use that status
+    let status = studentData.fee_paid ? 'Paid' : 'Pending';
+    let paidAmount = 0;
+    let remainingAmount = totalAmount;
+    
+    if (initialInvoice) {
+      status = 'Paid';
+      paidAmount = initialInvoice.total_amount || totalAmount;
+      remainingAmount = Math.max(0, totalAmount - paidAmount);
+    }
     
     const feeData = {
       student_id: studentData._id,
@@ -122,23 +231,44 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       fee_frequency: studentData.fee_frequency || 'Monthly',
       discount: studentData.discount || 0,
       total_amount: totalAmount,
+      paid_amount: paidAmount,
+      remaining_amount: remainingAmount,
       due_date: studentData.enrollment_date || new Date(),
-      status: studentData.fee_paid ? 'Paid' : 'Pending',
+      status: status,
       payment_date: studentData.payment_date || null,
       payment_method: studentData.payment_mode || 'Cash',
-      notes: `Auto-created from student registration - ${studentData.name}`,
+      notes: initialInvoice ? 
+        `Auto-created from student registration - ${studentData.name} (Initial invoice: ${initialInvoice.invoice_number})` :
+        `Auto-created from student registration - ${studentData.name}`,
+      fee_period: {
+        month: new Date().toISOString().slice(0, 7),
+        start_date: new Date(),
+        end_date: new Date(new Date().setMonth(new Date().getMonth() + 1) - 1),
+      },
+      fee_plan: studentData.recurring_fees?.fee_plan || 'Monthly',
+      is_recurring: true,
+      recurring_fees: {
+        tuition_fee: studentData.recurring_fees?.tuition_fee || 0,
+        activity_fee: studentData.recurring_fees?.activity_fee || 0,
+        transport_fee: studentData.recurring_fees?.transport_fee || 0,
+        total_monthly: studentData.recurring_fees?.total_monthly || 0,
+      },
     };
     
     if (existingFee) {
-      const updatedFee = await Fee.findByIdAndUpdate(
-        existingFee._id,
-        { 
-          ...feeData,
-          updated_at: Date.now() 
-        },
-        { new: true, runValidators: true }
-      );
-      return { success: true, data: updatedFee, action: 'updated' };
+      // Don't override if there's an initial invoice
+      if (!initialInvoice || existingFee.status === 'Pending') {
+        const updatedFee = await Fee.findByIdAndUpdate(
+          existingFee._id,
+          { 
+            ...feeData,
+            updated_at: Date.now() 
+          },
+          { new: true, runValidators: true }
+        );
+        return { success: true, data: updatedFee, action: 'updated' };
+      }
+      return { success: true, data: existingFee, action: 'skipped' };
     } else {
       const newFee = new Fee(feeData);
       await newFee.save();
@@ -333,7 +463,8 @@ router.get('/fee-breakdown/:id', async (req, res) => {
       total_amount: student.total_amount || 0,
       fee_paid: student.fee_paid,
       payment_date: student.payment_date,
-      payment_mode: student.payment_mode
+      payment_mode: student.payment_mode,
+      recurring_fees: student.recurring_fees || {},
     });
   } catch (error) {
     console.error('Error fetching fee breakdown:', error);
@@ -383,6 +514,8 @@ router.post('/', async (req, res) => {
       payment_date,
       payment_mode,
       authorized_pickup,
+      // Recurring fees fields
+      recurring_fees,
     } = req.body;
     
     // Validate mandatory documents
@@ -427,7 +560,6 @@ router.post('/', async (req, res) => {
     
     // Validate authorized pickup if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
-      // Only validate phone if it's provided
       if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
         return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
       }
@@ -495,6 +627,12 @@ router.post('/', async (req, res) => {
     const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     const totalAmount = Math.max(0, subtotal - disc);
     
+    // Calculate recurring fees total
+    const recurringTotal = 
+      (recurring_fees?.tuition_fee || 0) + 
+      (recurring_fees?.activity_fee || 0) + 
+      (recurring_fees?.transport_fee || 0);
+    
     const studentData = {
       name,
       date_of_birth: new Date(date_of_birth),
@@ -517,7 +655,6 @@ router.post('/', async (req, res) => {
       },
       medical_info: medical_info || '',
       enrollment_date: new Date(enrollment_date),
-      // Enrollment fields
       admission_date: new Date(admission_date),
       academic_year: academic_year,
       enrollment_type: enrollment_type || 'New Admission',
@@ -540,11 +677,30 @@ router.post('/', async (req, res) => {
       fee_paid: fee_paid || false,
       payment_date: payment_date ? new Date(payment_date) : null,
       payment_mode: payment_mode || 'Cash',
+      // Recurring fees
+      recurring_fees: {
+        tuition_fee: recurring_fees?.tuition_fee || 0,
+        activity_fee: recurring_fees?.activity_fee || 0,
+        transport_fee: recurring_fees?.transport_fee || 0,
+        total_monthly: recurringTotal,
+        start_month: recurring_fees?.start_month || new Date().toISOString().slice(0, 7),
+        end_month: recurring_fees?.end_month || null,
+        fee_plan: recurring_fees?.fee_plan || 'Monthly',
+        auto_generate: recurring_fees?.auto_generate !== undefined ? recurring_fees.auto_generate : true,
+        last_generated_month: null,
+        initial_payment: {
+          amount: 0,
+          paid: false,
+          payment_date: null,
+          payment_method: payment_mode || 'Cash',
+          invoice_id: null,
+          transaction_id: '',
+        },
+      },
     };
     
     // Add authorized pickup only if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
-      // Only set if there's at least one field with value
       const hasPickupData = authorized_pickup.name || authorized_pickup.relationship || authorized_pickup.phone;
       if (hasPickupData) {
         studentData.authorized_pickup = {
@@ -557,6 +713,58 @@ router.post('/', async (req, res) => {
     
     const student = new Student(studentData);
     const savedStudent = await student.save();
+    
+    // Create initial invoice and payment record if fee is paid or initial payment is provided
+    let initialInvoiceResult = null;
+    if (fee_paid && recurringTotal > 0) {
+      const paymentInfo = {
+        initial_payment_amount: totalAmount,
+        payment_date: payment_date ? new Date(payment_date) : new Date(),
+        payment_mode: payment_mode || 'Cash',
+        transaction_id: '',
+      };
+      initialInvoiceResult = await createInitialFeeInvoice(savedStudent, paymentInfo);
+      console.log(`📄 Initial invoice created for ${savedStudent.name}: ${initialInvoiceResult.success ? 'Success' : 'Failed'}`);
+    } else if (recurringTotal > 0) {
+      // Create the invoice but mark as pending if not paid
+      const Fee = require('../models/Fee');
+      const startMonth = savedStudent.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
+      
+      const invoiceData = {
+        student_id: savedStudent._id,
+        registration_fee: savedStudent.registration_fee || 0,
+        admission_fee: savedStudent.admission_fee || 0,
+        tuition_fee: savedStudent.recurring_fees?.tuition_fee || 0,
+        activity_fee: savedStudent.recurring_fees?.activity_fee || 0,
+        transport_fee: savedStudent.recurring_fees?.transport_fee || 0,
+        total_amount: recurringTotal,
+        due_date: new Date(),
+        status: 'Pending',
+        notes: `Initial invoice for ${savedStudent.name} - ${startMonth} (Pending)`,
+        fee_period: {
+          start_date: new Date(startMonth + '-01'),
+          end_date: new Date(new Date(startMonth + '-01').setMonth(new Date(startMonth + '-01').getMonth() + 1) - 1),
+          month: startMonth,
+        },
+        fee_plan: savedStudent.recurring_fees?.fee_plan || 'Monthly',
+        is_recurring: true,
+        generated_for_month: startMonth,
+        paid_amount: 0,
+        remaining_amount: recurringTotal,
+        advance_amount: 0,
+        overdue_amount: 0,
+        recurring_fees: {
+          tuition_fee: savedStudent.recurring_fees?.tuition_fee || 0,
+          activity_fee: savedStudent.recurring_fees?.activity_fee || 0,
+          transport_fee: savedStudent.recurring_fees?.transport_fee || 0,
+          total_monthly: savedStudent.recurring_fees?.total_monthly || 0,
+        },
+      };
+      
+      const invoice = new Fee(invoiceData);
+      await invoice.save();
+      console.log(`📄 Initial pending invoice created for ${savedStudent.name}`);
+    }
     
     // Sync student fees to finance module
     const feeSyncResult = await syncStudentFeesToFinance(savedStudent, false);
@@ -576,6 +784,7 @@ router.post('/', async (req, res) => {
     const responseData = populatedStudent.toObject();
     responseData.sync = syncResult;
     responseData.feeSync = feeSyncResult;
+    responseData.initialInvoice = initialInvoiceResult;
     
     res.status(201).json(responseData);
   } catch (error) {
@@ -633,6 +842,7 @@ router.put('/:id', async (req, res) => {
       payment_date,
       payment_mode,
       authorized_pickup,
+      recurring_fees,
     } = req.body;
     
     // Verify teacher exists if provided
@@ -741,6 +951,12 @@ router.put('/:id', async (req, res) => {
     const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     const totalAmount = Math.max(0, subtotal - disc);
     
+    // Calculate recurring fees total
+    const recurringTotal = 
+      (recurring_fees?.tuition_fee || existingStudent.recurring_fees?.tuition_fee || 0) + 
+      (recurring_fees?.activity_fee || existingStudent.recurring_fees?.activity_fee || 0) + 
+      (recurring_fees?.transport_fee || existingStudent.recurring_fees?.transport_fee || 0);
+    
     const studentData = {
       name,
       date_of_birth: new Date(date_of_birth),
@@ -763,7 +979,6 @@ router.put('/:id', async (req, res) => {
       } : existingStudent.emergency_contact,
       medical_info: medical_info || '',
       enrollment_date: new Date(enrollment_date),
-      // Enrollment fields
       admission_date: admission_date ? new Date(admission_date) : existingStudent.admission_date,
       academic_year: academic_year || existingStudent.academic_year,
       enrollment_type: enrollment_type || existingStudent.enrollment_type || 'New Admission',
@@ -787,6 +1002,25 @@ router.put('/:id', async (req, res) => {
       payment_date: payment_date ? new Date(payment_date) : existingStudent.payment_date,
       payment_mode: payment_mode || existingStudent.payment_mode || 'Cash',
       updated_at: Date.now(),
+      recurring_fees: {
+        tuition_fee: recurring_fees?.tuition_fee !== undefined ? recurring_fees.tuition_fee : existingStudent.recurring_fees?.tuition_fee || 0,
+        activity_fee: recurring_fees?.activity_fee !== undefined ? recurring_fees.activity_fee : existingStudent.recurring_fees?.activity_fee || 0,
+        transport_fee: recurring_fees?.transport_fee !== undefined ? recurring_fees.transport_fee : existingStudent.recurring_fees?.transport_fee || 0,
+        total_monthly: recurringTotal,
+        start_month: recurring_fees?.start_month || existingStudent.recurring_fees?.start_month || new Date().toISOString().slice(0, 7),
+        end_month: recurring_fees?.end_month !== undefined ? recurring_fees.end_month : existingStudent.recurring_fees?.end_month || null,
+        fee_plan: recurring_fees?.fee_plan || existingStudent.recurring_fees?.fee_plan || 'Monthly',
+        auto_generate: recurring_fees?.auto_generate !== undefined ? recurring_fees.auto_generate : (existingStudent.recurring_fees?.auto_generate !== undefined ? existingStudent.recurring_fees.auto_generate : true),
+        last_generated_month: existingStudent.recurring_fees?.last_generated_month || null,
+        initial_payment: existingStudent.recurring_fees?.initial_payment || {
+          amount: 0,
+          paid: false,
+          payment_date: null,
+          payment_method: 'Cash',
+          invoice_id: null,
+          transaction_id: '',
+        },
+      },
     };
     
     // Add authorized pickup only if Walker and has data
@@ -989,6 +1223,7 @@ router.post('/sync-to-mobile', async (req, res) => {
       academic_year: student.academic_year || '',
       enrollment_type: student.enrollment_type || 'New Admission',
       previous_class: student.previous_class || '',
+      recurring_fees: student.recurring_fees || {},
     }));
     
     if (!process.env.MOBILE_BACKEND_URL) {
