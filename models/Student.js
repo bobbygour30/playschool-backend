@@ -330,7 +330,7 @@ const studentSchema = new mongoose.Schema({
     },
     relationship: {
       type: String,
-      enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other', ''],
+      enum: ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other', '', null],
       default: null,
     },
     phone: {
@@ -431,6 +431,27 @@ const studentSchema = new mongoose.Schema({
   updated_at: { type: Date, default: Date.now },
 });
 
+// ==================== PRE-VALIDATE MIDDLEWARE ====================
+// Clean up authorized_pickup before validation
+studentSchema.pre('validate', function(next) {
+  // If transport is not Walker, set authorized_pickup to null
+  if (this.transport_type !== 'Walker') {
+    this.authorized_pickup = null;
+  }
+  
+  // If authorized_pickup exists and all fields are empty/null, set to null
+  if (this.authorized_pickup) {
+    const hasAnyValue = this.authorized_pickup.name || 
+                        this.authorized_pickup.relationship || 
+                        this.authorized_pickup.phone;
+    if (!hasAnyValue) {
+      this.authorized_pickup = null;
+    }
+  }
+  
+  next();
+});
+
 // ==================== PRE-SAVE MIDDLEWARE ====================
 
 studentSchema.pre('save', function(next) {
@@ -462,21 +483,6 @@ studentSchema.pre('save', function(next) {
       (this.attendance.present_days / this.attendance.total_days) * 100;
   }
   
-  // Clean up authorized_pickup - if transport is not Walker, set to null
-  if (this.transport_type !== 'Walker') {
-    this.authorized_pickup = null;
-  }
-  
-  // If authorized_pickup exists and all fields are empty/null, set to null
-  if (this.authorized_pickup) {
-    const hasAnyValue = this.authorized_pickup.name || 
-                        this.authorized_pickup.relationship || 
-                        this.authorized_pickup.phone;
-    if (!hasAnyValue) {
-      this.authorized_pickup = null;
-    }
-  }
-  
   // Set default academic_year if not provided
   if (!this.academic_year) {
     const currentYear = new Date().getFullYear();
@@ -494,6 +500,16 @@ studentSchema.pre('save', function(next) {
 // Pre-update middleware to calculate total
 studentSchema.pre('findOneAndUpdate', function(next) {
   const update = this.getUpdate();
+  
+  // Handle authorized_pickup relationship enum defensively for patches
+  if (update.authorized_pickup && update.authorized_pickup.relationship !== undefined) {
+    const validRelationships = ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other', '', null];
+    if (!validRelationships.includes(update.authorized_pickup.relationship)) {
+      // Set to null if invalid
+      update.authorized_pickup.relationship = null;
+    }
+  }
+  
   if (update.registration_fee !== undefined || 
       update.admission_fee !== undefined || 
       update.tuition_fee !== undefined || 

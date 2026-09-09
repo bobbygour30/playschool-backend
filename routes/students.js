@@ -771,10 +771,14 @@ router.post('/', async (req, res) => {
       if (hasPickupData) {
         studentData.authorized_pickup = {
           name: authorized_pickup.name || null,
-          relationship: authorized_pickup.relationship || null,
+          relationship: authorized_pickup.relationship || '',   // '' not null
           phone: authorized_pickup.phone || null,
         };
+      } else {
+        studentData.authorized_pickup = null;
       }
+    } else {
+      studentData.authorized_pickup = null;   // Always explicitly set
     }
     
     const student = new Student(studentData);
@@ -1121,7 +1125,7 @@ router.put('/:id', async (req, res) => {
       if (hasPickupData) {
         studentData.authorized_pickup = {
           name: authorized_pickup.name || null,
-          relationship: authorized_pickup.relationship || null,
+          relationship: authorized_pickup.relationship || '',   // '' not null
           phone: authorized_pickup.phone || null,
         };
       } else {
