@@ -244,15 +244,30 @@ feeSchema.pre('save', async function(next) {
   
   // Calculate remaining amount
   this.remaining_amount = this.total_amount - (this.paid_amount || 0);
-  this.overdue_amount = this.due_date && new Date() > new Date(this.due_date) ? this.remaining_amount : 0;
   
-  // Update status based on payment
+  // Calculate overdue amount - only if due date is passed AND amount is still pending
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dueDate = new Date(this.due_date);
+  dueDate.setHours(0, 0, 0, 0);
+  
+  if (dueDate < today && this.remaining_amount > 0) {
+    this.overdue_amount = this.remaining_amount;
+  } else {
+    this.overdue_amount = 0;
+  }
+  
+  // Update status based on payment and overdue
   if (this.remaining_amount <= 0 && this.paid_amount > 0) {
     this.status = 'Paid';
   } else if (this.paid_amount > 0 && this.remaining_amount > 0) {
     this.status = 'Partial';
   } else if (this.advance_amount > 0 && this.remaining_amount <= 0) {
     this.status = 'Advance';
+  } else if (this.overdue_amount > 0) {
+    this.status = 'Overdue';
+  } else if (this.paid_amount === 0 && this.total_amount > 0) {
+    this.status = 'Pending';
   }
   
   // Generate invoice number if not exists
@@ -266,7 +281,7 @@ feeSchema.pre('save', async function(next) {
   next();
 });
 
-// Method to record a payment
+// Method to record a payment with automatic status update
 feeSchema.methods.recordPayment = function(paymentData) {
   const { 
     amount, 
@@ -277,12 +292,13 @@ feeSchema.methods.recordPayment = function(paymentData) {
     recorded_by,
     invoice_number,
     advance_allocation,
+    payment_date,
   } = paymentData;
   
   // Add to payment history
   this.payment_history.push({
     amount,
-    payment_date: new Date(),
+    payment_date: payment_date || new Date(),
     payment_method,
     transaction_id: transaction_id || '',
     payment_type,
@@ -307,16 +323,32 @@ feeSchema.methods.recordPayment = function(paymentData) {
   this.remaining_amount = this.total_amount - this.paid_amount;
   
   // Update overdue amount
-  this.overdue_amount = this.due_date && new Date() > new Date(this.due_date) ? this.remaining_amount : 0;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dueDate = new Date(this.due_date);
+  dueDate.setHours(0, 0, 0, 0);
+  
+  if (dueDate < today && this.remaining_amount > 0) {
+    this.overdue_amount = this.remaining_amount;
+  } else {
+    this.overdue_amount = 0;
+  }
   
   // Update status
   if (this.remaining_amount <= 0) {
     this.status = 'Paid';
-    this.payment_date = new Date();
+    this.payment_date = payment_date || new Date();
     this.payment_method = payment_method;
     this.transaction_id = transaction_id || '';
-  } else if (this.paid_amount > 0) {
+  } else if (this.paid_amount > 0 && this.remaining_amount > 0) {
     this.status = 'Partial';
+    this.payment_date = payment_date || new Date();
+    this.payment_method = payment_method;
+    this.transaction_id = transaction_id || '';
+  } else if (this.overdue_amount > 0) {
+    this.status = 'Overdue';
+  } else {
+    this.status = 'Pending';
   }
   
   return this.save();

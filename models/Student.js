@@ -769,7 +769,7 @@ studentSchema.methods.getAllFees = function() {
   return Fee.find({ student_id: this._id }).sort({ due_date: -1 });
 };
 
-// Get fee summary for student
+// Get fee summary for student with proper status calculation
 studentSchema.methods.getFeeSummary = async function() {
   const Fee = mongoose.model('Fee');
   const fees = await Fee.find({ student_id: this._id });
@@ -781,10 +781,15 @@ studentSchema.methods.getFeeSummary = async function() {
     total_overdue: 0,
     total_advance: 0,
     invoices: fees.length,
-    paid_invoices: fees.filter(f => f.status === 'Paid').length,
-    pending_invoices: fees.filter(f => f.status === 'Pending' || f.status === 'Partial').length,
-    overdue_invoices: fees.filter(f => f.status === 'Overdue').length,
+    paid_invoices: 0,
+    pending_invoices: 0,
+    overdue_invoices: 0,
+    is_overdue: false,
+    status: 'Paid', // Default status
   };
+  
+  let hasPending = false;
+  let hasOverdue = false;
   
   fees.forEach(fee => {
     summary.total_charged += fee.total_amount || 0;
@@ -792,8 +797,51 @@ studentSchema.methods.getFeeSummary = async function() {
     summary.total_remaining += fee.remaining_amount || 0;
     summary.total_overdue += fee.overdue_amount || 0;
     summary.total_advance += fee.advance_amount || 0;
+    
+    // Count by status
+    if (fee.status === 'Paid') {
+      summary.paid_invoices++;
+    } else if (fee.status === 'Overdue') {
+      summary.overdue_invoices++;
+      hasOverdue = true;
+    } else if (fee.status === 'Pending' || fee.status === 'Partial') {
+      summary.pending_invoices++;
+      hasPending = true;
+    }
+    
+    // Check if any invoice is overdue
+    if (fee.overdue_amount > 0) {
+      hasOverdue = true;
+    }
   });
   
+  // Determine overall fee status
+  if (hasOverdue) {
+    summary.status = 'Overdue';
+    summary.is_overdue = true;
+  } else if (hasPending || summary.total_remaining > 0) {
+    summary.status = 'Pending';
+  } else if (summary.total_charged > 0 && summary.total_paid >= summary.total_charged) {
+    summary.status = 'Paid';
+  } else {
+    summary.status = 'Not Configured';
+  }
+  
+  // Update student's fee_paid field for backward compatibility
+  this.fee_paid = summary.status === 'Paid';
+  
+  return summary;
+};
+
+// Sync student's fee status from Fee collection
+studentSchema.methods.syncFeeStatus = async function() {
+  const summary = await this.getFeeSummary();
+  this.fee_paid = summary.status === 'Paid';
+  // If overdue, mark as not paid
+  if (summary.status === 'Overdue') {
+    this.fee_paid = false;
+  }
+  await this.save({ validateBeforeSave: false });
   return summary;
 };
 
@@ -812,7 +860,9 @@ studentSchema.methods.recordFeePayment = async function(paymentData) {
     recorded_by: recorded_by || null,
   });
   
-  await this.save();
+  // Update fee_paid status based on actual fee records
+  await this.syncFeeStatus();
+  
   return this.fee_payment_history[this.fee_payment_history.length - 1];
 };
 
@@ -1092,7 +1142,7 @@ studentSchema.virtual('attendanceStatus').get(function() {
   return 'Needs Improvement';
 });
 
-// Virtual for fee status
+// Virtual for fee status - now properly synced with Fee collection
 studentSchema.virtual('feeStatus').get(function() {
   const total = this.total_amount || 0;
   const paid = this.fee_paid ? total : 0;

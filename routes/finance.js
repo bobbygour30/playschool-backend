@@ -64,6 +64,120 @@ router.get('/fees', async (req, res) => {
   }
 });
 
+// ==================== FEE SUMMARY - MUST COME BEFORE /fees/:id ====================
+// Get fee summary for a specific fee record (for payment modal)
+router.get('/fees/:id/summary', async (req, res) => {
+  try {
+    const fee = await Fee.findById(req.params.id)
+      .populate('student_id', 'name class_id');
+    
+    if (!fee) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Fee record not found' 
+      });
+    }
+
+    const totalAmount = fee.total_amount || 0;
+    const paidAmount = fee.paid_amount || 0;
+    const remainingAmount = totalAmount - paidAmount;
+    const overdueAmount = fee.overdue_amount || 0;
+    const advanceAmount = fee.advance_amount || 0;
+    const dueDate = fee.due_date;
+    const feePeriod = fee.fee_period;
+    const status = fee.status;
+    const invoiceNumber = fee.invoice_number;
+    const isOverdue = new Date(dueDate) < new Date() && remainingAmount > 0;
+
+    // Determine payment type automatically
+    let suggestedPaymentType = 'full';
+    if (remainingAmount <= 0) {
+      suggestedPaymentType = 'full';
+    } else if (paidAmount > 0 && remainingAmount > 0) {
+      suggestedPaymentType = 'partial';
+    }
+
+    res.json({
+      success: true,
+      data: {
+        fee_id: fee._id,
+        student_name: fee.student_id?.name || 'Unknown',
+        student_class: fee.student_id?.class_id || 'N/A',
+        invoice_number: invoiceNumber,
+        fee_period: feePeriod,
+        due_date: dueDate,
+        total_amount: totalAmount,
+        paid_amount: paidAmount,
+        remaining_amount: remainingAmount,
+        overdue_amount: overdueAmount,
+        advance_amount: advanceAmount,
+        status: status,
+        is_overdue: isOverdue,
+        suggested_payment_type: suggestedPaymentType,
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching fee summary:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// ==================== GET PAYMENT HISTORY - MUST COME BEFORE /fees/:id ====================
+// Get payment history for a fee with full details
+router.get('/fees/:id/payments', async (req, res) => {
+  try {
+    const fee = await Fee.findById(req.params.id)
+      .populate('student_id', 'name parent_name class_id recurring_fees')
+      .select('payment_history student_id total_amount paid_amount remaining_amount overdue_amount advance_amount status invoice_number invoice_date fee_period');
+
+    if (!fee) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Fee record not found' 
+      });
+    }
+
+    // Get all related invoices for this student
+    const relatedInvoices = await Fee.find({
+      student_id: fee.student_id._id,
+      _id: { $ne: fee._id },
+    })
+    .select('invoice_number total_amount paid_amount status due_date fee_period')
+    .sort({ due_date: -1 });
+
+    res.json({
+      success: true,
+      data: {
+        fee: {
+          _id: fee._id,
+          invoice_number: fee.invoice_number,
+          invoice_date: fee.invoice_date,
+          fee_period: fee.fee_period,
+          total_amount: fee.total_amount,
+          paid_amount: fee.paid_amount,
+          remaining_amount: fee.remaining_amount,
+          overdue_amount: fee.overdue_amount,
+          advance_amount: fee.advance_amount,
+          status: fee.status,
+        },
+        student: fee.student_id,
+        related_invoices: relatedInvoices,
+        payment_history: fee.payment_history.sort((a, b) => b.recorded_at - a.recorded_at),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching payment history:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// ==================== GET FEE BY ID - MUST COME AFTER SPECIFIC ROUTES ====================
 // Get fee by ID with full details
 router.get('/fees/:id', async (req, res) => {
   try {
@@ -217,7 +331,6 @@ router.post('/fees/record-payment', async (req, res) => {
       fee_id,
       amount_paid,
       payment_date,
-      payment_type,
       payment_method,
       transaction_no,
       notes,
@@ -248,11 +361,23 @@ router.post('/fees/record-payment', async (req, res) => {
       });
     }
 
-    const remaining = fee.total_amount - (fee.paid_amount || 0);
+    const totalAmount = fee.total_amount || 0;
+    const paidAmount = fee.paid_amount || 0;
+    const remaining = totalAmount - paidAmount;
     
+    // Determine payment type automatically
+    let paymentType = 'full';
+    if (amount_paid > remaining) {
+      paymentType = 'advance';
+    } else if (amount_paid < remaining) {
+      paymentType = 'partial';
+    } else {
+      paymentType = 'full';
+    }
+
     // Handle advance payment
     let advanceAllocation = [];
-    if (payment_type === 'advance' || amount_paid > remaining) {
+    if (paymentType === 'advance' || amount_paid > remaining) {
       // Calculate advance amount
       const advanceAmount = amount_paid - (remaining > 0 ? remaining : 0);
       
@@ -313,7 +438,7 @@ router.post('/fees/record-payment', async (req, res) => {
       payment_date: payment_date ? new Date(payment_date) : new Date(),
       payment_method: payment_method || 'Cash',
       transaction_id: transaction_no || '',
-      payment_type: payment_type || 'full',
+      payment_type: paymentType,
       notes: notes || '',
       recorded_by: recorded_by || null,
       advance_allocation: advanceAllocation,
@@ -329,61 +454,11 @@ router.post('/fees/record-payment', async (req, res) => {
       success: true,
       message: 'Payment recorded successfully',
       data: updatedFee,
+      payment_type: paymentType,
     });
 
   } catch (error) {
     console.error('Error recording payment:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-});
-
-// Get payment history for a fee with full details
-router.get('/fees/:id/payments', async (req, res) => {
-  try {
-    const fee = await Fee.findById(req.params.id)
-      .populate('student_id', 'name parent_name class_id recurring_fees')
-      .select('payment_history student_id total_amount paid_amount remaining_amount overdue_amount advance_amount status invoice_number invoice_date fee_period');
-
-    if (!fee) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Fee record not found' 
-      });
-    }
-
-    // Get all related invoices for this student
-    const relatedInvoices = await Fee.find({
-      student_id: fee.student_id._id,
-      _id: { $ne: fee._id },
-    })
-    .select('invoice_number total_amount paid_amount status due_date fee_period')
-    .sort({ due_date: -1 });
-
-    res.json({
-      success: true,
-      data: {
-        fee: {
-          _id: fee._id,
-          invoice_number: fee.invoice_number,
-          invoice_date: fee.invoice_date,
-          fee_period: fee.fee_period,
-          total_amount: fee.total_amount,
-          paid_amount: fee.paid_amount,
-          remaining_amount: fee.remaining_amount,
-          overdue_amount: fee.overdue_amount,
-          advance_amount: fee.advance_amount,
-          status: fee.status,
-        },
-        student: fee.student_id,
-        related_invoices: relatedInvoices,
-        payment_history: fee.payment_history.sort((a, b) => b.recorded_at - a.recorded_at),
-      },
-    });
-  } catch (error) {
-    console.error('Error fetching payment history:', error);
     res.status(500).json({ 
       success: false, 
       message: error.message 
