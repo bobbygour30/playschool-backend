@@ -128,6 +128,13 @@ const studentSchema = new mongoose.Schema({
     default: 'Active',
   },
   
+  // ==================== FEE STRUCTURE (NEW) ====================
+  fee_structure: {
+    type: String,
+    enum: ['toddler', 'pre-nursery', 'nursery', 'kg-1', 'other'],
+    default: null,
+  },
+  
   // ==================== RECURRING FEES ====================
   recurring_fees: {
     tuition_fee: {
@@ -1099,5 +1106,6 @@ studentSchema.index({ academic_year: 1 });
 studentSchema.index({ enrollment_type: 1 });
 studentSchema.index({ 'recurring_fees.auto_generate': 1 });
 studentSchema.index({ 'recurring_fees.total_monthly': 1 });
+studentSchema.index({ fee_structure: 1 });
 
 module.exports = mongoose.model('Student', studentSchema);

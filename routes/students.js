@@ -9,6 +9,46 @@ const Fee = require('../models/Fee');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
+// ==================== FEE STRUCTURE DEFINITIONS ====================
+// Adjust the amounts to match your actual fee plans
+const FEE_STRUCTURES = {
+  toddler: {
+    name: 'Toddler Fee Plan',
+    registration_fee: 5000,
+    admission_fee: 15000,
+    kit_fee: 2500,
+    camera_fee: 800,
+  },
+  'pre-nursery': {
+    name: 'Pre-Nursery Fee Plan',
+    registration_fee: 5500,
+    admission_fee: 18000,
+    kit_fee: 3000,
+    camera_fee: 1000,
+  },
+  nursery: {
+    name: 'Nursery Fee Plan',
+    registration_fee: 6000,
+    admission_fee: 20000,
+    kit_fee: 3500,
+    camera_fee: 1200,
+  },
+  'kg-1': {
+    name: 'KG-1 Fee Plan',
+    registration_fee: 7000,
+    admission_fee: 25000,
+    kit_fee: 4000,
+    camera_fee: 1500,
+  },
+  other: {
+    name: 'Other / Custom',
+    registration_fee: 0,
+    admission_fee: 0,
+    kit_fee: 0,
+    camera_fee: 0,
+  },
+};
+
 // Helper function to convert to ObjectId safely
 const toObjectId = (id) => {
   if (!id) return null;
@@ -72,6 +112,7 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         academic_year: studentData.academic_year || '',
         enrollment_type: studentData.enrollment_type || 'New Admission',
         previous_class: studentData.previous_class || '',
+        fee_structure: studentData.fee_structure || null,
         // Recurring fees
         recurring_fees: studentData.recurring_fees || {},
       };
@@ -305,6 +346,11 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ==================== GET FEE STRUCTURES (helper for frontend) ====================
+router.get('/fee-structures', (req, res) => {
+  res.json(FEE_STRUCTURES);
+});
+
 // ==================== GET STUDENTS BY CLASS ====================
 router.get('/class/:classId', async (req, res) => {
   try {
@@ -451,6 +497,7 @@ router.get('/fee-breakdown/:id', async (req, res) => {
     
     res.json({
       student_name: student.name,
+      fee_structure: student.fee_structure || null,
       registration_fee: student.registration_fee || 0,
       admission_fee: student.admission_fee || 0,
       tuition_fee: student.tuition_fee || 0,
@@ -514,6 +561,7 @@ router.post('/', async (req, res) => {
       payment_date,
       payment_mode,
       authorized_pickup,
+      fee_structure,          // NEW
       // Recurring fees fields
       recurring_fees,
     } = req.body;
@@ -615,14 +663,31 @@ router.post('/', async (req, res) => {
       classType = 'custom';
     }
     
-    // Calculate total amount from all fee components with discount
-    const regFee = parseFloat(registration_fee) || 0;
-    const admFee = parseFloat(admission_fee) || 0;
+    // ==================== APPLY FEE STRUCTURE ====================
+    let regFee = parseFloat(registration_fee);
+    let admFee = parseFloat(admission_fee);
+    let kitFee = parseFloat(kit_fee);
+    let camFee = parseFloat(camera_fee);
+
+    // If a fee structure is selected and the corresponding fee was not explicitly provided,
+    // auto-fill from the structure.
+    if (fee_structure && FEE_STRUCTURES[fee_structure]) {
+      const structure = FEE_STRUCTURES[fee_structure];
+      if (isNaN(regFee)) regFee = structure.registration_fee;
+      if (isNaN(admFee)) admFee = structure.admission_fee;
+      if (isNaN(kitFee)) kitFee = structure.kit_fee;
+      if (isNaN(camFee)) camFee = structure.camera_fee;
+    }
+
+    // Fallback to 0
+    regFee = isNaN(regFee) ? 0 : regFee;
+    admFee = isNaN(admFee) ? 0 : admFee;
+    kitFee = isNaN(kitFee) ? 0 : kitFee;
+    camFee = isNaN(camFee) ? 0 : camFee;
+
     const tuiFee = parseFloat(tuition_fee) || 0;
     const actFee = parseFloat(activity_fee) || 0;
-    const kitFee = parseFloat(kit_fee) || 0;
     const cabFee = parseFloat(cab_fee) || 0;
-    const camFee = parseFloat(camera_fee) || 0;
     const disc = parseFloat(discount) || 0;
     const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     const totalAmount = Math.max(0, subtotal - disc);
@@ -664,6 +729,7 @@ router.post('/', async (req, res) => {
       vendor_id: transport_type !== 'Walker' ? vendor_id : null,
       status: status || 'Active',
       documents: uploadedDocuments,
+      fee_structure: fee_structure || null,          // NEW
       registration_fee: regFee,
       admission_fee: admFee,
       tuition_fee: tuiFee,
@@ -842,6 +908,7 @@ router.put('/:id', async (req, res) => {
       payment_date,
       payment_mode,
       authorized_pickup,
+      fee_structure,          // NEW
       recurring_fees,
     } = req.body;
     
@@ -939,15 +1006,39 @@ router.put('/:id', async (req, res) => {
       classType = 'custom';
     }
     
-    // Calculate total amount from all fee components with discount
-    const regFee = parseFloat(registration_fee) !== undefined ? parseFloat(registration_fee) : existingStudent.registration_fee || 0;
-    const admFee = parseFloat(admission_fee) !== undefined ? parseFloat(admission_fee) : existingStudent.admission_fee || 0;
-    const tuiFee = parseFloat(tuition_fee) !== undefined ? parseFloat(tuition_fee) : existingStudent.tuition_fee || 0;
-    const actFee = parseFloat(activity_fee) !== undefined ? parseFloat(activity_fee) : existingStudent.activity_fee || 0;
-    const kitFee = parseFloat(kit_fee) !== undefined ? parseFloat(kit_fee) : existingStudent.kit_fee || 0;
-    const cabFee = parseFloat(cab_fee) !== undefined ? parseFloat(cab_fee) : existingStudent.cab_fee || 0;
-    const camFee = parseFloat(camera_fee) !== undefined ? parseFloat(camera_fee) : existingStudent.camera_fee || 0;
-    const disc = parseFloat(discount) !== undefined ? parseFloat(discount) : existingStudent.discount || 0;
+    // ==================== APPLY FEE STRUCTURE ON UPDATE ====================
+    let regFee = parseFloat(registration_fee);
+    let admFee = parseFloat(admission_fee);
+    let kitFee = parseFloat(kit_fee);
+    let camFee = parseFloat(camera_fee);
+
+    if (fee_structure && FEE_STRUCTURES[fee_structure]) {
+      const structure = FEE_STRUCTURES[fee_structure];
+      if (isNaN(regFee)) regFee = structure.registration_fee;
+      if (isNaN(admFee)) admFee = structure.admission_fee;
+      if (isNaN(kitFee)) kitFee = structure.kit_fee;
+      if (isNaN(camFee)) camFee = structure.camera_fee;
+    }
+
+    // Fall back to existing values if still NaN
+    regFee = isNaN(regFee) ? (existingStudent.registration_fee || 0) : regFee;
+    admFee = isNaN(admFee) ? (existingStudent.admission_fee || 0) : admFee;
+    kitFee = isNaN(kitFee) ? (existingStudent.kit_fee || 0) : kitFee;
+    camFee = isNaN(camFee) ? (existingStudent.camera_fee || 0) : camFee;
+
+    const tuiFee = parseFloat(tuition_fee) !== undefined && !isNaN(parseFloat(tuition_fee))
+      ? parseFloat(tuition_fee)
+      : existingStudent.tuition_fee || 0;
+    const actFee = parseFloat(activity_fee) !== undefined && !isNaN(parseFloat(activity_fee))
+      ? parseFloat(activity_fee)
+      : existingStudent.activity_fee || 0;
+    const cabFee = parseFloat(cab_fee) !== undefined && !isNaN(parseFloat(cab_fee))
+      ? parseFloat(cab_fee)
+      : existingStudent.cab_fee || 0;
+    const disc = parseFloat(discount) !== undefined && !isNaN(parseFloat(discount))
+      ? parseFloat(discount)
+      : existingStudent.discount || 0;
+
     const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     const totalAmount = Math.max(0, subtotal - disc);
     
@@ -988,6 +1079,7 @@ router.put('/:id', async (req, res) => {
       vendor_id: transport_type !== 'Walker' ? vendor_id : null,
       status: status || 'Active',
       documents: updatedDocuments,
+      fee_structure: fee_structure !== undefined ? fee_structure : existingStudent.fee_structure, // NEW
       registration_fee: regFee,
       admission_fee: admFee,
       tuition_fee: tuiFee,
@@ -1223,6 +1315,7 @@ router.post('/sync-to-mobile', async (req, res) => {
       academic_year: student.academic_year || '',
       enrollment_type: student.enrollment_type || 'New Admission',
       previous_class: student.previous_class || '',
+      fee_structure: student.fee_structure || null,
       recurring_fees: student.recurring_fees || {},
     }));
     
