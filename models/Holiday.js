@@ -42,6 +42,16 @@ const holidaySchema = new mongoose.Schema({
     ref: 'User',
     default: null,
   },
+  // ===== SYNC FIELDS =====
+  sync_status: {
+    type: String,
+    enum: ['pending', 'synced', 'failed'],
+    default: 'pending',
+  },
+  synced_at: { type: Date, default: null },
+  sync_error: { type: String, default: null },
+  sync_attempts: { type: Number, default: 0 },
+  // ======================
   created_at: {
     type: Date,
     default: Date.now,
@@ -52,14 +62,13 @@ const holidaySchema = new mongoose.Schema({
   },
 });
 
-// Update timestamp on save
-holidaySchema.pre('save', function(next) {
+holidaySchema.pre('save', function (next) {
   this.updated_at = Date.now();
   next();
 });
 
-// Index for faster queries
 holidaySchema.index({ date: 1 });
 holidaySchema.index({ type: 1 });
+holidaySchema.index({ sync_status: 1 });
 
 module.exports = mongoose.model('Holiday', holidaySchema);

@@ -48,6 +48,13 @@ const leaveRequestSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+
+  // ===== SYNC FIELDS =====
+  sync_status: {
+    type: String,
+    enum: ['pending', 'synced', 'failed'],
+    default: 'pending',
+  },
   
   // Substitute Teacher
   substitute_teacher_id: {

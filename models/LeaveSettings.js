@@ -48,6 +48,15 @@ const leaveSettingsSchema = new mongoose.Schema({
     student_leave_alert: { type: Boolean, default: true },
     substitute_assignment_alert: { type: Boolean, default: true },
   },
+  // ===== SYNC FIELDS =====
+  sync_status: {
+    type: String,
+    enum: ['pending', 'synced', 'failed'],
+    default: 'pending',
+  },
+  synced_at: { type: Date, default: null },
+  sync_error: { type: String, default: null },
+  sync_attempts: { type: Number, default: 0 },
   
   // Update Settings
   updated_by: {
