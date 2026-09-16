@@ -79,6 +79,7 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
       return { success: true, data: response.data };
     } else {
       const payload = {
+          webStudentId: studentData._id.toString(),   // NEW - stable identity
         name: studentData.name,
         rollNumber: studentData.rollNumber,
         class_id: studentData.class_id,
