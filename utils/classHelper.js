@@ -2,18 +2,18 @@
 
 // Standard classes mapping for PlaySchool
 const STANDARD_CLASSES = {
-  'toddler': 'Toddler',
-  'pre-nursery': 'Pre-Nursery',
+  'playgroup': 'Playgroup / Pre-Nursery',
   'nursery': 'Nursery',
-  'kg-1': 'KG-1',
+  'lkg': 'LKG',
+  'ukg': 'UKG',
 };
 
 // Class age ranges
 const CLASS_AGE_RANGES = {
-  'toddler': '1.5 - 2.5 years',
-  'pre-nursery': '2.5 - 3.5 years',
-  'nursery': '3.5 - 4.5 years',
-  'kg-1': '4.5 - 5.5 years',
+  'playgroup': '2 - 3 years',
+  'nursery': '3 - 4 years',
+  'lkg': '4 - 5 years',
+  'ukg': '5 - 6 years',
 };
 
 // Class sections

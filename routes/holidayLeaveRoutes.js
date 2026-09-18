@@ -972,10 +972,10 @@ router.get('/class-holiday-summary', async (req, res) => {
 
     const holidays = await Holiday.find(query);
     const classHolidays = {
-      Toddler: { count: 0, holidays: [] },
-      'Pre-Nursery': { count: 0, holidays: [] },
+      Playgroup: { count: 0, holidays: [] },
       Nursery: { count: 0, holidays: [] },
-      'KG-1': { count: 0, holidays: [] },
+      LKG: { count: 0, holidays: [] },
+      UKG: { count: 0, holidays: [] },
     };
 
     holidays.forEach((holiday) => {

@@ -35,7 +35,7 @@ const holidaySchema = new mongoose.Schema({
   },
   affected_classes: [{
     type: String,
-    enum: ['Toddler', 'Pre-Nursery', 'Nursery', 'KG-1'],
+    enum: ['Playgroup', 'Nursery', 'LKG', 'UKG'],
   }],
   created_by: {
     type: mongoose.Schema.Types.ObjectId,

@@ -4,7 +4,7 @@ const culminationSchema = new mongoose.Schema({
   class_id: {
     type: String,
     required: true,
-    enum: ['toddler', 'pre-nursery', 'nursery', 'kg-1'],
+    enum: ['playgroup', 'nursery', 'lkg', 'ukg'],
   },
   title: {
     type: String,

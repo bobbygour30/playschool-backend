@@ -12,29 +12,29 @@ const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudina
 // ==================== FEE STRUCTURE DEFINITIONS ====================
 // Adjust the amounts to match your actual fee plans
 const FEE_STRUCTURES = {
-  toddler: {
-    name: 'Toddler Fee Plan',
+  playgroup: {
+    name: 'Playgroup Fee Plan',
     registration_fee: 5000,
     admission_fee: 15000,
     kit_fee: 2500,
     camera_fee: 800,
   },
-  'pre-nursery': {
-    name: 'Pre-Nursery Fee Plan',
+  nursery: {
+    name: 'Nursery Fee Plan',
     registration_fee: 5500,
     admission_fee: 18000,
     kit_fee: 3000,
     camera_fee: 1000,
   },
-  nursery: {
-    name: 'Nursery Fee Plan',
+  lkg: {
+    name: 'LKG Fee Plan',
     registration_fee: 6000,
     admission_fee: 20000,
     kit_fee: 3500,
     camera_fee: 1200,
   },
-  'kg-1': {
-    name: 'KG-1 Fee Plan',
+  ukg: {
+    name: 'UKG Fee Plan',
     registration_fee: 7000,
     admission_fee: 25000,
     kit_fee: 4000,
@@ -421,7 +421,7 @@ router.get('/teacher/:teacherId', async (req, res) => {
 // ==================== GET CLASS-WISE STATISTICS ====================
 router.get('/stats/class-wise', async (req, res) => {
   try {
-    const classes = ['toddler', 'pre-nursery', 'nursery', 'kg-1'];
+    const classes = ['playgroup', 'nursery', 'lkg', 'ukg'];
     const stats = {};
     
     for (const className of classes) {
@@ -559,6 +559,7 @@ router.post('/', async (req, res) => {
       fee_frequency,
       discount,
       fee_paid,
+      fee_exempt,
       payment_date,
       payment_mode,
       authorized_pickup,
@@ -575,10 +576,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Birth Certificate is mandatory' });
     }
     if (!documents?.parent_aadhar_front) {
-      return res.status(400).json({ message: 'Parent Aadhar (Front) is mandatory' });
-    }
-    if (!documents?.parent_aadhar_back) {
-      return res.status(400).json({ message: 'Parent Aadhar (Back) is mandatory' });
+      return res.status(400).json({ message: 'Parent Aadhar Card is mandatory' });
     }
     
     // Validate emergency contact
@@ -647,12 +645,6 @@ router.post('/', async (req, res) => {
       if (documents.parent_aadhar_front) {
         uploadedDocuments.parent_aadhar_front = await uploadToCloudinary(
           documents.parent_aadhar_front,
-          'students/parent_aadhar'
-        );
-      }
-      if (documents.parent_aadhar_back) {
-        uploadedDocuments.parent_aadhar_back = await uploadToCloudinary(
-          documents.parent_aadhar_back,
           'students/parent_aadhar'
         );
       }
@@ -742,6 +734,7 @@ router.post('/', async (req, res) => {
       discount: disc,
       total_amount: totalAmount,
       fee_paid: fee_paid || false,
+      fee_exempt: fee_exempt || false,
       payment_date: payment_date ? new Date(payment_date) : null,
       payment_mode: payment_mode || 'Cash',
       // Recurring fees
@@ -787,7 +780,7 @@ router.post('/', async (req, res) => {
     
     // Create initial invoice and payment record if fee is paid or initial payment is provided
     let initialInvoiceResult = null;
-    if (fee_paid && recurringTotal > 0) {
+    if (fee_paid && !fee_exempt && recurringTotal > 0) {
       const paymentInfo = {
         initial_payment_amount: totalAmount,
         payment_date: payment_date ? new Date(payment_date) : new Date(),
@@ -796,7 +789,7 @@ router.post('/', async (req, res) => {
       };
       initialInvoiceResult = await createInitialFeeInvoice(savedStudent, paymentInfo);
       console.log(`📄 Initial invoice created for ${savedStudent.name}: ${initialInvoiceResult.success ? 'Success' : 'Failed'}`);
-    } else if (recurringTotal > 0) {
+    } else if (recurringTotal > 0 && !fee_exempt) {
       // Create the invoice but mark as pending if not paid
       const Fee = require('../models/Fee');
       const startMonth = savedStudent.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
@@ -910,6 +903,7 @@ router.put('/:id', async (req, res) => {
       fee_frequency,
       discount,
       fee_paid,
+      fee_exempt,
       payment_date,
       payment_mode,
       authorized_pickup,
@@ -991,15 +985,6 @@ router.put('/:id', async (req, res) => {
         }
         updatedDocuments.parent_aadhar_front = await uploadToCloudinary(
           documents.parent_aadhar_front,
-          'students/parent_aadhar'
-        );
-      }
-      if (documents.parent_aadhar_back && documents.parent_aadhar_back !== existingStudent.documents?.parent_aadhar_back) {
-        if (existingStudent.documents?.parent_aadhar_back) {
-          await deleteFromCloudinary(existingStudent.documents.parent_aadhar_back);
-        }
-        updatedDocuments.parent_aadhar_back = await uploadToCloudinary(
-          documents.parent_aadhar_back,
           'students/parent_aadhar'
         );
       }
@@ -1096,6 +1081,7 @@ router.put('/:id', async (req, res) => {
       discount: disc,
       total_amount: totalAmount,
       fee_paid: fee_paid !== undefined ? fee_paid : existingStudent.fee_paid,
+      fee_exempt: fee_exempt !== undefined ? fee_exempt : existingStudent.fee_exempt,
       payment_date: payment_date ? new Date(payment_date) : existingStudent.payment_date,
       payment_mode: payment_mode || existingStudent.payment_mode || 'Cash',
       updated_at: Date.now(),
@@ -1431,10 +1417,10 @@ router.post('/sync-fees-to-finance', async (req, res) => {
 
 // ==================== PROMOTE ALL STUDENTS TO NEXT CLASS ====================
 const CLASS_PROGRESSION = {
-  'toddler': 'pre-nursery',
-  'pre-nursery': 'nursery',
-  'nursery': 'kg-1',
-  'kg-1': null,
+  'playgroup': 'nursery',
+  'nursery': 'lkg',
+  'lkg': 'ukg',
+  'ukg': null,
 };
 
 router.post('/promote-all', async (req, res) => {

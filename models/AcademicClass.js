@@ -4,13 +4,13 @@ const academicClassSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    enum: ['Toddler', 'Pre-Nursery', 'Nursery', 'KG-1'],
+    enum: ['Playgroup', 'Nursery', 'LKG', 'UKG'],
   },
   class_id: {
     type: String,
     required: true,
     unique: true,
-    enum: ['toddler', 'pre-nursery', 'nursery', 'kg-1'],
+    enum: ['playgroup', 'nursery', 'lkg', 'ukg'],
   },
   age_group: {
     type: String,

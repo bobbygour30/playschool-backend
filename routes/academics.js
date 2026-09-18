@@ -775,7 +775,7 @@ router.delete('/culmination/:id', async (req, res) => {
 // Get academic statistics for dashboard
 router.get('/stats', async (req, res) => {
   try {
-    const classes = ['toddler', 'pre-nursery', 'nursery', 'kg-1'];
+    const classes = ['playgroup', 'nursery', 'lkg', 'ukg'];
     const stats = {};
     
     for (const classId of classes) {

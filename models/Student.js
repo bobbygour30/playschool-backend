@@ -131,7 +131,7 @@ const studentSchema = new mongoose.Schema({
   // ==================== FEE STRUCTURE (NEW) ====================
   fee_structure: {
     type: String,
-    enum: ['toddler', 'pre-nursery', 'nursery', 'kg-1', 'other'],
+    enum: ['playgroup', 'nursery', 'lkg', 'ukg', 'other'],
     default: null,
   },
   
@@ -255,6 +255,10 @@ const studentSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  fee_exempt: {
+    type: Boolean,
+    default: false,
+  },
   payment_date: {
     type: Date,
     default: null,
@@ -363,8 +367,7 @@ const studentSchema = new mongoose.Schema({
     },
     parent_aadhar_back: {
       type: String,
-      required: true,
-      default: null,
+      default: null, // required: true → removed
     },
   },
   
@@ -1014,7 +1017,7 @@ studentSchema.statics.getStudentsOnLeaveToday = async function() {
 studentSchema.statics.getLeaveStatisticsByClass = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   
-  const classes = ['Toddler', 'Pre-Nursery', 'Nursery', 'KG-1'];
+  const classes = ['playgroup', 'nursery', 'lkg', 'ukg'];
   const stats = {};
   
   for (const className of classes) {

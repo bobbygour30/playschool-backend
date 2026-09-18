@@ -41,7 +41,7 @@ const leaveRequestSchema = new mongoose.Schema({
   // Class Assignment
   assigned_class: {
     type: String,
-    enum: ['Toddler', 'Pre-Nursery', 'Nursery', 'KG-1', null],
+    enum: ['Playgroup', 'Nursery', 'LKG', 'UKG', null],
     default: null,
   },
   assigned_section: {

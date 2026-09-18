@@ -57,7 +57,7 @@ const facultySchema = new mongoose.Schema({
   class_mappings: [{
     class_name: {
       type: String,
-      enum: ['Toddler', 'Pre-Nursery', 'Nursery', 'KG-1'],
+      enum: ['Playgroup', 'Nursery', 'LKG', 'UKG'],
     },
     section: {
       type: String,
