@@ -1,51 +1,49 @@
 /**
- * clear-db-data.js
+ * fix-username-index.js
  *
- * Deletes ALL DOCUMENTS from EVERY COLLECTION in a MongoDB database,
- * WITHOUT dropping the collections themselves (indexes, validators,
- * and collection options are preserved).
+ * Fixes: E11000 duplicate key error ... index: username_1 dup key: { username: null }
+ *
+ * Cause: an old version of the Parent schema had a unique `username` field.
+ * That unique index (`username_1`) still exists on the `parents` collection
+ * even though the current schema no longer has a `username` field. Every
+ * new parent document therefore gets `username: null`, and MongoDB's unique
+ * index rejects the second (and every subsequent) `null` value.
+ *
+ * This script connects to your database, checks whether the stale
+ * `username_1` index exists on the `parents` collection, and drops it if so.
+ * It does NOT touch your documents or any other indexes (email_1,
+ * mobile_number_1, etc. are left alone).
  *
  * Usage:
- *   npm install mongodb        # if not already installed
+ *   npm install mongodb   # if not already installed
  *
- *   # If your URI already includes the db name (e.g. mongodb://host:27017/myDb):
- *   node clear-db-data.js "mongodb://host:27017/myDb"
+ *   # If your URI already includes the db name:
+ *   node fix-username-index.js "mongodb://host:27017/myDb"
  *
- *   # Otherwise, pass the db name explicitly as a 2nd argument:
- *   node clear-db-data.js "mongodb://host:27017" "myDatabaseName"
+ *   # Otherwise pass the db name explicitly as a 2nd argument:
+ *   node fix-username-index.js "mongodb://host:27017" "myDatabaseName"
  *
- * Or set env vars instead of passing args:
- *   MONGO_URI="mongodb://host:27017/myDb" node clear-db-data.js
- *
- * Safety:
- *   - Prompts for confirmation before deleting anything.
- *   - Pass --yes as an extra arg to skip the confirmation prompt (e.g. for CI/scripts).
+ * Or set an env var instead of passing an argument:
+ *   MONGODB_URI="mongodb://host:27017/myDb" node fix-username-index.js
  */
 
 const { MongoClient } = require('mongodb');
-const readline = require('readline');
 
-const args = process.argv.slice(2).filter((a) => a !== '--yes');
-const skipConfirm = process.argv.includes('--yes');
+const args = process.argv.slice(2);
 
-const uri = args[0] || process.env.MONGODB_URI || "mongodb+srv://playschool503_db_user:lnadfJYNjZofhxxN@cluster0.y7a98ry.mongodb.net/?appName=Cluster0";
+const uri =
+  args[0] ||
+  process.env.MONGODB_URI ||
+  'mongodb+srv://playschool503_db_user:lnadfJYNjZofhxxN@cluster0.y7a98ry.mongodb.net/?appName=Cluster0';
 const dbName = args[1] || process.env.MONGO_DB; // optional — falls back to the db in the URI
+
+const COLLECTION = 'parents';
+const INDEX_NAME = 'username_1';
 
 if (!uri) {
   console.error('Missing connection info.');
-  console.error('Usage: node clear-db-data.js "<mongo-uri>" ["<database-name>"] [--yes]');
-  console.error('(If <database-name> is omitted, the db from the URI\'s path is used.)');
+  console.error('Usage: node fix-username-index.js "<mongo-uri>" ["<database-name>"]');
   process.exit(1);
-}
-
-function confirm(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === 'yes');
-    });
-  });
 }
 
 async function main() {
@@ -53,7 +51,7 @@ async function main() {
 
   try {
     await client.connect();
-    const db = dbName ? client.db(dbName) : client.db(); // no name -> uses db from the URI
+    const db = dbName ? client.db(dbName) : client.db();
 
     if (!db.databaseName) {
       console.error(
@@ -62,38 +60,41 @@ async function main() {
       process.exit(1);
     }
 
-    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+    console.log(`Database: ${db.databaseName}`);
+    console.log(`Collection: ${COLLECTION}\n`);
 
+    const collections = await db.listCollections({ name: COLLECTION }).toArray();
     if (collections.length === 0) {
-      console.log(`No collections found in database "${db.databaseName}". Nothing to do.`);
+      console.log(`Collection "${COLLECTION}" does not exist. Nothing to do.`);
       return;
     }
 
-    console.log(`Database: ${db.databaseName}`);
-    console.log(`Collections found (${collections.length}):`);
-    collections.forEach((c) => console.log(`  - ${c.name}`));
+    const indexes = await db.collection(COLLECTION).indexes();
+    console.log('Current indexes:');
+    indexes.forEach((idx) => {
+      console.log(`  - ${idx.name}  key: ${JSON.stringify(idx.key)}  unique: ${!!idx.unique}`);
+    });
 
-    if (!skipConfirm) {
-      const ok = await confirm(
-        `\nThis will DELETE ALL DOCUMENTS in the above collections (collections themselves will stay). Type "yes" to continue: `
-      );
-      if (!ok) {
-        console.log('Aborted. No changes made.');
-        return;
-      }
+    const staleIndex = indexes.find((idx) => idx.name === INDEX_NAME);
+
+    if (!staleIndex) {
+      console.log(`\nNo "${INDEX_NAME}" index found. Nothing to drop — you're already clean.`);
+      return;
     }
 
-    for (const { name } of collections) {
-      // Skip system collections just in case
-      if (name.startsWith('system.')) continue;
+    console.log(`\nFound stale index "${INDEX_NAME}". Dropping it...`);
+    await db.collection(COLLECTION).dropIndex(INDEX_NAME);
+    console.log(`Dropped "${INDEX_NAME}" successfully.`);
 
-      const result = await db.collection(name).deleteMany({});
-      console.log(`Cleared "${name}": ${result.deletedCount} document(s) deleted.`);
-    }
+    const remaining = await db.collection(COLLECTION).indexes();
+    console.log('\nRemaining indexes:');
+    remaining.forEach((idx) => {
+      console.log(`  - ${idx.name}  key: ${JSON.stringify(idx.key)}  unique: ${!!idx.unique}`);
+    });
 
-    console.log('\nDone. All collections still exist, now empty.');
+    console.log('\nDone. You should now be able to create parents without the duplicate key error.');
   } catch (err) {
-    console.error('Error while clearing database:', err);
+    console.error('Error while fixing index:', err);
     process.exitCode = 1;
   } finally {
     await client.close();
