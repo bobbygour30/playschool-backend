@@ -8,35 +8,13 @@ const feeSchema = new mongoose.Schema({
     index: true,
   },
   
-  // Fee components (matching student schema)
-  registration_fee: {
-    type: Number,
-    default: 0,
-  },
-  admission_fee: {
-    type: Number,
-    default: 0,
-  },
-  tuition_fee: {
-    type: Number,
-    default: 0,
-  },
-  activity_fee: {
-    type: Number,
-    default: 0,
-  },
-  kit_fee: {
-    type: Number,
-    default: 0,
-  },
-  transport_fee: {
-    type: Number,
-    default: 0, // Maps to cab_fee from student
-  },
-  camera_fee: {
-    type: Number,
-    default: 0,
-  },
+  registration_fee: { type: Number, default: 0 },
+  admission_fee: { type: Number, default: 0 },
+  tuition_fee: { type: Number, default: 0 },
+  activity_fee: { type: Number, default: 0 },
+  kit_fee: { type: Number, default: 0 },
+  transport_fee: { type: Number, default: 0 },
+  camera_fee: { type: Number, default: 0 },
   
   // Recurring fees (monthly)
   recurring_fees: {
@@ -44,44 +22,43 @@ const feeSchema = new mongoose.Schema({
     activity_fee: { type: Number, default: 0 },
     transport_fee: { type: Number, default: 0 },
     total_monthly: { type: Number, default: 0 },
+    // Day of month (1-31) this invoice's monthly fee is due on.
+    // Carried on the invoice for record-keeping; the source of truth for
+    // FUTURE invoices lives on Student.recurring_fees.monthly_due_day.
+    monthly_due_day: {
+      type: Number,
+      min: 1,
+      max: 31,
+      default: 5,
+    },
   },
   
-  // Fee period
   fee_period: {
     start_date: { type: Date },
     end_date: { type: Date },
     month: { type: String }, // Format: YYYY-MM
   },
   
-  // Fee plan reference
   fee_plan: {
     type: String,
     enum: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly', 'One-Time'],
     default: 'Monthly',
   },
   
-  total_amount: {
-    type: Number,
-    default: 0,
-  },
+  total_amount: { type: Number, default: 0 },
   
   // Payment tracking
-  paid_amount: {
-    type: Number,
-    default: 0,
-  },
-  remaining_amount: {
-    type: Number,
-    default: 0,
-  },
-  advance_amount: {
-    type: Number,
-    default: 0,
-  },
-  overdue_amount: {
-    type: Number,
-    default: 0,
-  },
+  paid_amount: { type: Number, default: 0 },
+  // The REAL outstanding amount (total - paid), regardless of due date.
+  // Always used when a parent is actually recording/paying, including
+  // paying an upcoming invoice early.
+  remaining_amount: { type: Number, default: 0 },
+  // DISPLAY-ONLY balance that respects the monthly due date:
+  // 0 before the due date ("Upcoming"), the real remaining amount on/after
+  // the due date. Never negative. This is what the finance table shows.
+  balance_due: { type: Number, default: 0 },
+  advance_amount: { type: Number, default: 0 },
+  overdue_amount: { type: Number, default: 0 },
   
   due_date: {
     type: Date,
@@ -89,8 +66,8 @@ const feeSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Pending', 'Paid', 'Overdue', 'Partial', 'Advance'],
-    default: 'Pending',
+    enum: ['Upcoming', 'Due', 'Pending', 'Paid', 'Overdue', 'Partial', 'Advance'],
+    default: 'Upcoming',
   },
   
   // Payment details
@@ -108,7 +85,6 @@ const feeSchema = new mongoose.Schema({
     default: '',
   },
   
-  // Payment history with invoice references
   payment_history: [{
     amount: {
       type: Number,
@@ -153,15 +129,13 @@ const feeSchema = new mongoose.Schema({
       type: Date,
       default: Date.now,
     },
-    // For advance payments mapping to future months
     advance_allocation: [{
-      month: { type: String }, // YYYY-MM
+      month: { type: String },
       amount: { type: Number },
       invoice_id: { type: String },
     }],
   }],
   
-  // Invoice details
   invoice_number: {
     type: String,
     unique: true,
@@ -176,7 +150,6 @@ const feeSchema = new mongoose.Schema({
     default: null,
   },
   
-  // Additional info
   notes: {
     type: String,
     default: '',
@@ -186,7 +159,6 @@ const feeSchema = new mongoose.Schema({
     default: null,
   },
   
-  // For recurring fee tracking
   is_recurring: {
     type: Boolean,
     default: false,
@@ -201,7 +173,7 @@ const feeSchema = new mongoose.Schema({
     ref: 'Fee',
   }],
   generated_for_month: {
-    type: String, // Format: YYYY-MM
+    type: String,
     default: null,
   },
   
@@ -215,18 +187,90 @@ const feeSchema = new mongoose.Schema({
   },
 });
 
-// Indexes for faster queries
 feeSchema.index({ student_id: 1, due_date: -1 });
 feeSchema.index({ status: 1 });
 feeSchema.index({ invoice_number: 1 });
 feeSchema.index({ generated_for_month: 1 });
 feeSchema.index({ 'fee_period.month': 1 });
 
-// Auto-generate invoice number before save
-feeSchema.pre('save', async function(next) {
+// ==================== LIVE STATUS / BALANCE COMPUTATION ====================
+// Status and balance are date-sensitive (Upcoming -> Due -> Overdue), so this
+// is computed on demand — at save time AND every time a fee is fetched by a
+// route — rather than trusted purely from whatever was last persisted. This
+// keeps a fee that simply "sits" past its due date (with no writes) accurate
+// the moment it's read.
+feeSchema.methods.computeLiveStatus = function () {
+  const total = this.total_amount || 0;
+  const paid = this.paid_amount || 0;
+  const remaining = Math.max(0, total - paid);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dueDate = this.due_date ? new Date(this.due_date) : new Date();
+  dueDate.setHours(0, 0, 0, 0);
+
+  let status;
+  let balance_due;
+  let overdue_amount;
+
+  if (remaining <= 0 && total > 0) {
+    status = (this.advance_amount || 0) > 0 ? 'Advance' : 'Paid';
+    balance_due = 0;
+    overdue_amount = 0;
+  } else if (paid > 0) {
+    // A partial payment already exists against this invoice — it's already
+    // "active", so show the outstanding balance regardless of the due date.
+    status = 'Partial';
+    balance_due = remaining;
+    overdue_amount = today > dueDate ? remaining : 0;
+  } else if (today < dueDate) {
+    status = 'Upcoming';
+    balance_due = 0;
+    overdue_amount = 0;
+  } else if (today.getTime() === dueDate.getTime()) {
+    status = 'Due';
+    balance_due = remaining;
+    overdue_amount = 0;
+  } else {
+    status = 'Overdue';
+    balance_due = remaining;
+    overdue_amount = remaining;
+  }
+
+  return {
+    status,
+    remaining_amount: remaining,
+    balance_due: Math.max(0, balance_due),
+    overdue_amount: Math.max(0, overdue_amount),
+  };
+};
+
+// A plain object with live-computed fields merged in — safe to send
+// straight out of a route as JSON.
+feeSchema.methods.toLiveJSON = function () {
+  const obj = this.toObject();
+  const live = this.computeLiveStatus();
+  obj.status = live.status;
+  obj.remaining_amount = live.remaining_amount;
+  obj.balance_due = live.balance_due;
+  obj.overdue_amount = live.overdue_amount;
+  return obj;
+};
+
+// Given a 'YYYY-MM' month and a day-of-month (1-31), returns the due Date
+// for that month, clamped to the month's last valid day (e.g. day 31 in
+// February becomes the 28th/29th).
+feeSchema.statics.computeDueDate = function (month, dueDay) {
+  const safeMonth = month || new Date().toISOString().slice(0, 7);
+  const [year, mon] = safeMonth.split('-').map(Number);
+  const daysInMonth = new Date(year, mon, 0).getDate();
+  const day = Math.min(Math.max(parseInt(dueDay) || 5, 1), daysInMonth);
+  return new Date(year, mon - 1, day);
+};
+
+feeSchema.pre('save', async function (next) {
   this.updated_at = Date.now();
   
-  // Auto-calculate total amount
   this.total_amount = 
     (this.registration_fee || 0) + 
     (this.admission_fee || 0) + 
@@ -236,41 +280,17 @@ feeSchema.pre('save', async function(next) {
     (this.transport_fee || 0) + 
     (this.camera_fee || 0);
   
-  // Calculate recurring total
   this.recurring_fees.total_monthly = 
     (this.recurring_fees.tuition_fee || 0) + 
     (this.recurring_fees.activity_fee || 0) + 
     (this.recurring_fees.transport_fee || 0);
   
-  // Calculate remaining amount
-  this.remaining_amount = this.total_amount - (this.paid_amount || 0);
+  const live = this.computeLiveStatus();
+  this.remaining_amount = live.remaining_amount;
+  this.balance_due = live.balance_due;
+  this.overdue_amount = live.overdue_amount;
+  this.status = live.status;
   
-  // Calculate overdue amount - only if due date is passed AND amount is still pending
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dueDate = new Date(this.due_date);
-  dueDate.setHours(0, 0, 0, 0);
-  
-  if (dueDate < today && this.remaining_amount > 0) {
-    this.overdue_amount = this.remaining_amount;
-  } else {
-    this.overdue_amount = 0;
-  }
-  
-  // Update status based on payment and overdue
-  if (this.remaining_amount <= 0 && this.paid_amount > 0) {
-    this.status = 'Paid';
-  } else if (this.paid_amount > 0 && this.remaining_amount > 0) {
-    this.status = 'Partial';
-  } else if (this.advance_amount > 0 && this.remaining_amount <= 0) {
-    this.status = 'Advance';
-  } else if (this.overdue_amount > 0) {
-    this.status = 'Overdue';
-  } else if (this.paid_amount === 0 && this.total_amount > 0) {
-    this.status = 'Pending';
-  }
-  
-  // Generate invoice number if not exists
   if (!this.invoice_number) {
     const year = new Date().getFullYear();
     const month = String(new Date().getMonth() + 1).padStart(2, '0');
@@ -282,7 +302,7 @@ feeSchema.pre('save', async function(next) {
 });
 
 // Method to record a payment with automatic status update
-feeSchema.methods.recordPayment = function(paymentData) {
+feeSchema.methods.recordPayment = function (paymentData) {
   const { 
     amount, 
     payment_method, 
@@ -295,7 +315,6 @@ feeSchema.methods.recordPayment = function(paymentData) {
     payment_date,
   } = paymentData;
   
-  // Add to payment history
   this.payment_history.push({
     amount,
     payment_date: payment_date || new Date(),
@@ -308,57 +327,37 @@ feeSchema.methods.recordPayment = function(paymentData) {
     advance_allocation: advance_allocation || [],
   });
   
-  // Update paid amount
-  this.paid_amount = (this.paid_amount || 0) + amount;
+  const paidBefore = this.paid_amount || 0;
+  this.paid_amount = paidBefore + amount;
   
-  // Track advance payment
-  if (payment_type === 'advance' && advance_allocation) {
-    this.advance_amount = (this.advance_amount || 0) + amount;
-    // Allocate advance to future months
-    for (const allocation of advance_allocation) {
-      // This will be handled by the route to create future invoices
-    }
+  if (payment_type === 'advance') {
+    const remainingBefore = Math.max(0, (this.total_amount || 0) - paidBefore);
+    const advancePortion = Math.max(0, amount - remainingBefore);
+    this.advance_amount = (this.advance_amount || 0) + advancePortion;
   }
   
-  this.remaining_amount = this.total_amount - this.paid_amount;
+  const live = this.computeLiveStatus();
+  this.remaining_amount = live.remaining_amount;
+  this.balance_due = live.balance_due;
+  this.overdue_amount = live.overdue_amount;
+  this.status = live.status;
   
-  // Update overdue amount
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dueDate = new Date(this.due_date);
-  dueDate.setHours(0, 0, 0, 0);
-  
-  if (dueDate < today && this.remaining_amount > 0) {
-    this.overdue_amount = this.remaining_amount;
-  } else {
-    this.overdue_amount = 0;
-  }
-  
-  // Update status
-  if (this.remaining_amount <= 0) {
-    this.status = 'Paid';
+  if (['Paid', 'Partial', 'Advance'].includes(live.status)) {
     this.payment_date = payment_date || new Date();
     this.payment_method = payment_method;
     this.transaction_id = transaction_id || '';
-  } else if (this.paid_amount > 0 && this.remaining_amount > 0) {
-    this.status = 'Partial';
-    this.payment_date = payment_date || new Date();
-    this.payment_method = payment_method;
-    this.transaction_id = transaction_id || '';
-  } else if (this.overdue_amount > 0) {
-    this.status = 'Overdue';
-  } else {
-    this.status = 'Pending';
   }
   
   return this.save();
 };
 
-// Method to generate recurring invoices
-feeSchema.statics.generateRecurringInvoices = async function(studentId, month, fees) {
+// Method to generate a single recurring invoice for a given month, with its
+// due_date computed from the configured monthly due day.
+feeSchema.statics.generateRecurringInvoices = async function (studentId, month, fees, dueDay = 5) {
   const { tuition_fee, activity_fee, transport_fee } = fees;
   
   const totalMonthly = (tuition_fee || 0) + (activity_fee || 0) + (transport_fee || 0);
+  const dueDate = this.computeDueDate(month, dueDay);
   
   const invoice = new this({
     student_id: studentId,
@@ -367,12 +366,13 @@ feeSchema.statics.generateRecurringInvoices = async function(studentId, month, f
       activity_fee: activity_fee || 0,
       transport_fee: transport_fee || 0,
       total_monthly: totalMonthly,
+      monthly_due_day: dueDay,
     },
     tuition_fee: tuition_fee || 0,
     activity_fee: activity_fee || 0,
     transport_fee: transport_fee || 0,
     total_amount: totalMonthly,
-    due_date: new Date(month + '-01'),
+    due_date: dueDate,
     fee_period: {
       start_date: new Date(month + '-01'),
       end_date: new Date(new Date(month + '-01').setMonth(new Date(month + '-01').getMonth() + 1) - 1),
@@ -381,7 +381,6 @@ feeSchema.statics.generateRecurringInvoices = async function(studentId, month, f
     fee_plan: 'Monthly',
     is_recurring: true,
     generated_for_month: month,
-    status: 'Pending',
   });
   
   await invoice.save();

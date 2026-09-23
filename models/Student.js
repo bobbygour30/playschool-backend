@@ -164,6 +164,16 @@ const studentSchema = new mongoose.Schema({
       type: String, // Format: YYYY-MM
       default: null,
     },
+    // ==================== MONTHLY DUE DAY (NEW) ====================
+    // Day of the month (1-31) on which each recurring monthly invoice is due.
+    // Replaces the old one-time "due date" concept — this is a recurring
+    // configuration used to calculate due_date for every generated invoice.
+    monthly_due_day: {
+      type: Number,
+      min: 1,
+      max: 31,
+      default: 5,
+    },
     fee_plan: {
       type: String,
       enum: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'],
@@ -435,14 +445,11 @@ const studentSchema = new mongoose.Schema({
 });
 
 // ==================== PRE-VALIDATE MIDDLEWARE ====================
-// Clean up authorized_pickup before validation
 studentSchema.pre('validate', function(next) {
-  // If transport is not Walker, set authorized_pickup to null
   if (this.transport_type !== 'Walker') {
     this.authorized_pickup = null;
   }
   
-  // If authorized_pickup exists and all fields are empty/null, set to null
   if (this.authorized_pickup) {
     const hasAnyValue = this.authorized_pickup.name || 
                         this.authorized_pickup.relationship || 
@@ -460,7 +467,6 @@ studentSchema.pre('validate', function(next) {
 studentSchema.pre('save', function(next) {
   this.updated_at = Date.now();
   
-  // Auto-calculate total amount from all fee components
   const subtotal = 
     (this.registration_fee || 0) + 
     (this.admission_fee || 0) + 
@@ -472,7 +478,6 @@ studentSchema.pre('save', function(next) {
   
   this.total_amount = Math.max(0, subtotal - (this.discount || 0));
   
-  // Auto-calculate recurring fees total
   if (this.recurring_fees) {
     this.recurring_fees.total_monthly = 
       (this.recurring_fees.tuition_fee || 0) + 
@@ -480,19 +485,16 @@ studentSchema.pre('save', function(next) {
       (this.recurring_fees.transport_fee || 0);
   }
   
-  // Update attendance percentage
   if (this.attendance.total_days > 0) {
     this.attendance.attendance_percentage = 
       (this.attendance.present_days / this.attendance.total_days) * 100;
   }
   
-  // Set default academic_year if not provided
   if (!this.academic_year) {
     const currentYear = new Date().getFullYear();
     this.academic_year = `${currentYear}-${currentYear + 1}`;
   }
   
-  // Set default start month for recurring fees if not set
   if (this.recurring_fees && !this.recurring_fees.start_month) {
     this.recurring_fees.start_month = new Date().toISOString().slice(0, 7);
   }
@@ -504,11 +506,9 @@ studentSchema.pre('save', function(next) {
 studentSchema.pre('findOneAndUpdate', function(next) {
   const update = this.getUpdate();
   
-  // Handle authorized_pickup relationship enum defensively for patches
   if (update.authorized_pickup && update.authorized_pickup.relationship !== undefined) {
     const validRelationships = ['Mother', 'Father', 'Guardian', 'Grandparent', 'Aunt', 'Uncle', 'Sibling', 'Other', '', null];
     if (!validRelationships.includes(update.authorized_pickup.relationship)) {
-      // Set to null if invalid
       update.authorized_pickup.relationship = null;
     }
   }
@@ -534,7 +534,6 @@ studentSchema.pre('findOneAndUpdate', function(next) {
     update.total_amount = Math.max(0, subtotal - discount);
   }
   
-  // Update recurring fees total
   if (update.recurring_fees) {
     const rf = update.recurring_fees;
     rf.total_monthly = (rf.tuition_fee || 0) + (rf.activity_fee || 0) + (rf.transport_fee || 0);
@@ -544,8 +543,8 @@ studentSchema.pre('findOneAndUpdate', function(next) {
 });
 
 // ==================== INSTANCE METHODS ====================
+// (unchanged from original — leave_balances, attendance, fee summary helpers, etc.)
 
-// Calculate leave balance for a specific type
 studentSchema.methods.calculateLeaveBalance = function(leaveType) {
   const balance = this.leave_balances[leaveType];
   if (!balance) return { total: 0, used: 0, remaining: 0 };
@@ -559,7 +558,6 @@ studentSchema.methods.calculateLeaveBalance = function(leaveType) {
   };
 };
 
-// Get all leave balances
 studentSchema.methods.getAllLeaveBalances = function() {
   const balances = {};
   const leaveTypes = ['sick', 'casual', 'study', 'other'];
@@ -571,7 +569,6 @@ studentSchema.methods.getAllLeaveBalances = function() {
   return balances;
 };
 
-// Deduct leave days from student's balance
 studentSchema.methods.deductLeave = async function(leaveType, days) {
   const balance = this.leave_balances[leaveType];
   if (!balance) return { success: false, message: 'Invalid leave type' };
@@ -590,7 +587,6 @@ studentSchema.methods.deductLeave = async function(leaveType, days) {
   return { success: true, remaining: balance.remaining };
 };
 
-// Add leave days (for carryover or adjustments)
 studentSchema.methods.addLeave = async function(leaveType, days, isCarryover = false) {
   const balance = this.leave_balances[leaveType];
   if (!balance) return { success: false, message: 'Invalid leave type' };
@@ -606,7 +602,6 @@ studentSchema.methods.addLeave = async function(leaveType, days, isCarryover = f
   return { success: true, remaining: balance.remaining };
 };
 
-// Check if student has pending leave request
 studentSchema.methods.hasPendingLeave = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   const count = await LeaveRequest.countDocuments({
@@ -617,7 +612,6 @@ studentSchema.methods.hasPendingLeave = async function() {
   return count > 0;
 };
 
-// Get student's leave history
 studentSchema.methods.getLeaveHistory = async function(limit = 10) {
   const LeaveRequest = mongoose.model('LeaveRequest');
   return await LeaveRequest.find({
@@ -628,7 +622,6 @@ studentSchema.methods.getLeaveHistory = async function(limit = 10) {
   .limit(limit);
 };
 
-// Get student's active leaves (currently on leave)
 studentSchema.methods.getActiveLeaves = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   const today = new Date();
@@ -643,7 +636,6 @@ studentSchema.methods.getActiveLeaves = async function() {
   });
 };
 
-// Check if student is on leave on a specific date
 studentSchema.methods.isOnLeaveOnDate = async function(date) {
   const targetDate = new Date(date);
   targetDate.setHours(0, 0, 0, 0);
@@ -660,7 +652,6 @@ studentSchema.methods.isOnLeaveOnDate = async function(date) {
   return !!leave;
 };
 
-// Update student's leave summary
 studentSchema.methods.updateLeaveSummary = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   
@@ -679,7 +670,7 @@ studentSchema.methods.updateLeaveSummary = async function() {
           $sum: {
             $add: [
               { $subtract: ['$to_date', '$from_date'] },
-              86400000 // Add 1 day in milliseconds
+              86400000
             ]
           }
         }
@@ -687,7 +678,6 @@ studentSchema.methods.updateLeaveSummary = async function() {
     }
   ]);
   
-  // Initialize summary
   this.leave_summary = {
     total_leaves: 0,
     pending_leaves: 0,
@@ -696,7 +686,6 @@ studentSchema.methods.updateLeaveSummary = async function() {
     total_days_used: 0,
   };
   
-  // Process summary results
   summary.forEach(item => {
     const days = Math.ceil(item.totalDays / (1000 * 60 * 60 * 24));
     this.leave_summary.total_leaves += item.count;
@@ -713,7 +702,6 @@ studentSchema.methods.updateLeaveSummary = async function() {
   return this.leave_summary;
 };
 
-// Record attendance
 studentSchema.methods.recordAttendance = async function(status, date = new Date()) {
   const today = new Date(date);
   today.setHours(0, 0, 0, 0);
@@ -732,7 +720,6 @@ studentSchema.methods.recordAttendance = async function(status, date = new Date(
   return this.attendance;
 };
 
-// Get attendance report
 studentSchema.methods.getAttendanceReport = function() {
   return {
     present_days: this.attendance.present_days,
@@ -745,7 +732,6 @@ studentSchema.methods.getAttendanceReport = function() {
 
 // ==================== FEE RELATED METHODS ====================
 
-// Get current month's fee breakdown
 studentSchema.methods.getCurrentMonthFee = function() {
   const currentMonth = new Date().toISOString().slice(0, 7);
   return {
@@ -757,7 +743,6 @@ studentSchema.methods.getCurrentMonthFee = function() {
   };
 };
 
-// Get fee due for a specific month
 studentSchema.methods.getFeeForMonth = function(month) {
   const Fee = mongoose.model('Fee');
   return Fee.findOne({
@@ -766,13 +751,11 @@ studentSchema.methods.getFeeForMonth = function(month) {
   });
 };
 
-// Get all fee invoices for student
 studentSchema.methods.getAllFees = function() {
   const Fee = mongoose.model('Fee');
   return Fee.find({ student_id: this._id }).sort({ due_date: -1 });
 };
 
-// Get fee summary for student with proper status calculation
 studentSchema.methods.getFeeSummary = async function() {
   const Fee = mongoose.model('Fee');
   const fees = await Fee.find({ student_id: this._id });
@@ -788,37 +771,39 @@ studentSchema.methods.getFeeSummary = async function() {
     pending_invoices: 0,
     overdue_invoices: 0,
     is_overdue: false,
-    status: 'Paid', // Default status
+    status: 'Paid',
   };
   
   let hasPending = false;
   let hasOverdue = false;
   
   fees.forEach(fee => {
+    const live = typeof fee.computeLiveStatus === 'function' ? fee.computeLiveStatus() : null;
+    const feeStatus = live ? live.status : fee.status;
+    const feeRemaining = live ? live.remaining_amount : (fee.remaining_amount || 0);
+    const feeOverdue = live ? live.overdue_amount : (fee.overdue_amount || 0);
+
     summary.total_charged += fee.total_amount || 0;
     summary.total_paid += fee.paid_amount || 0;
-    summary.total_remaining += fee.remaining_amount || 0;
-    summary.total_overdue += fee.overdue_amount || 0;
+    summary.total_remaining += feeRemaining;
+    summary.total_overdue += feeOverdue;
     summary.total_advance += fee.advance_amount || 0;
     
-    // Count by status
-    if (fee.status === 'Paid') {
+    if (feeStatus === 'Paid') {
       summary.paid_invoices++;
-    } else if (fee.status === 'Overdue') {
+    } else if (feeStatus === 'Overdue') {
       summary.overdue_invoices++;
       hasOverdue = true;
-    } else if (fee.status === 'Pending' || fee.status === 'Partial') {
+    } else if (feeStatus === 'Pending' || feeStatus === 'Partial' || feeStatus === 'Due' || feeStatus === 'Upcoming') {
       summary.pending_invoices++;
-      hasPending = true;
+      if (feeStatus !== 'Upcoming') hasPending = true;
     }
     
-    // Check if any invoice is overdue
-    if (fee.overdue_amount > 0) {
+    if (feeOverdue > 0) {
       hasOverdue = true;
     }
   });
   
-  // Determine overall fee status
   if (hasOverdue) {
     summary.status = 'Overdue';
     summary.is_overdue = true;
@@ -830,17 +815,14 @@ studentSchema.methods.getFeeSummary = async function() {
     summary.status = 'Not Configured';
   }
   
-  // Update student's fee_paid field for backward compatibility
   this.fee_paid = summary.status === 'Paid';
   
   return summary;
 };
 
-// Sync student's fee status from Fee collection
 studentSchema.methods.syncFeeStatus = async function() {
   const summary = await this.getFeeSummary();
   this.fee_paid = summary.status === 'Paid';
-  // If overdue, mark as not paid
   if (summary.status === 'Overdue') {
     this.fee_paid = false;
   }
@@ -848,7 +830,6 @@ studentSchema.methods.syncFeeStatus = async function() {
   return summary;
 };
 
-// Record a fee payment
 studentSchema.methods.recordFeePayment = async function(paymentData) {
   const { amount, method, invoice_number, invoice_id, payment_type, notes, recorded_by } = paymentData;
   
@@ -863,13 +844,11 @@ studentSchema.methods.recordFeePayment = async function(paymentData) {
     recorded_by: recorded_by || null,
   });
   
-  // Update fee_paid status based on actual fee records
   await this.syncFeeStatus();
   
   return this.fee_payment_history[this.fee_payment_history.length - 1];
 };
 
-// Check if fee is fully paid for current month
 studentSchema.methods.isCurrentMonthFeePaid = async function() {
   const currentMonth = new Date().toISOString().slice(0, 7);
   const Fee = mongoose.model('Fee');
@@ -882,12 +861,10 @@ studentSchema.methods.isCurrentMonthFeePaid = async function() {
   return fee.status === 'Paid';
 };
 
-// Create initial invoice for student
 studentSchema.methods.createInitialInvoice = async function(paymentData) {
   const Fee = mongoose.model('Fee');
   const { amount, payment_date, payment_method, transaction_id, notes } = paymentData;
   
-  // Check if initial invoice already exists
   const existingInvoice = await Fee.findOne({
     student_id: this._id,
     status: 'Paid',
@@ -898,11 +875,11 @@ studentSchema.methods.createInitialInvoice = async function(paymentData) {
     return { success: false, message: 'Initial invoice already exists', invoice: existingInvoice };
   }
   
-  // Calculate total recurring amount for the initial month
   const monthlyTotal = this.recurring_fees?.total_monthly || 0;
   const startMonth = this.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
+  const dueDay = this.recurring_fees?.monthly_due_day || 5;
+  const dueDate = Fee.computeDueDate(startMonth, dueDay);
   
-  // Create the invoice
   const invoiceData = {
     student_id: this._id,
     registration_fee: this.registration_fee || 0,
@@ -911,7 +888,7 @@ studentSchema.methods.createInitialInvoice = async function(paymentData) {
     activity_fee: this.recurring_fees?.activity_fee || 0,
     transport_fee: this.recurring_fees?.transport_fee || 0,
     total_amount: amount || monthlyTotal,
-    due_date: new Date(),
+    due_date: dueDate,
     status: 'Paid',
     payment_date: payment_date ? new Date(payment_date) : new Date(),
     payment_method: payment_method || 'Cash',
@@ -934,13 +911,13 @@ studentSchema.methods.createInitialInvoice = async function(paymentData) {
       activity_fee: this.recurring_fees?.activity_fee || 0,
       transport_fee: this.recurring_fees?.transport_fee || 0,
       total_monthly: this.recurring_fees?.total_monthly || 0,
+      monthly_due_day: dueDay,
     },
   };
   
   const invoice = new Fee(invoiceData);
   await invoice.save();
   
-  // Record payment in student's payment history
   await this.recordFeePayment({
     amount: amount || monthlyTotal,
     method: payment_method || 'Cash',
@@ -950,7 +927,6 @@ studentSchema.methods.createInitialInvoice = async function(paymentData) {
     notes: notes || `Initial payment for ${this.name}`,
   });
   
-  // Update student's recurring fees initial payment info
   this.recurring_fees.initial_payment = {
     amount: amount || monthlyTotal,
     paid: true,
@@ -960,7 +936,6 @@ studentSchema.methods.createInitialInvoice = async function(paymentData) {
     transaction_id: transaction_id || '',
   };
   
-  // Update last generated month
   this.recurring_fees.last_generated_month = startMonth;
   
   await this.save();
@@ -970,7 +945,6 @@ studentSchema.methods.createInitialInvoice = async function(paymentData) {
 
 // ==================== STATIC METHODS ====================
 
-// Get students by class with leave balances
 studentSchema.statics.getStudentsByClassWithLeaveBalances = async function(classId) {
   return await this.find({ 
     class_id: classId,
@@ -978,7 +952,6 @@ studentSchema.statics.getStudentsByClassWithLeaveBalances = async function(class
   }).select('name leave_balances attendance');
 };
 
-// Get students with pending leaves
 studentSchema.statics.getStudentsWithPendingLeaves = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   const pendingLeaves = await LeaveRequest.find({
@@ -992,7 +965,6 @@ studentSchema.statics.getStudentsWithPendingLeaves = async function() {
   }).select('name class_id section parent_name parent_phone parent_email');
 };
 
-// Get students on leave today
 studentSchema.statics.getStudentsOnLeaveToday = async function() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -1013,7 +985,6 @@ studentSchema.statics.getStudentsOnLeaveToday = async function() {
   }).select('name class_id section parent_name parent_phone');
 };
 
-// Get student leave statistics by class
 studentSchema.statics.getLeaveStatisticsByClass = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   
@@ -1065,7 +1036,6 @@ studentSchema.statics.getLeaveStatisticsByClass = async function() {
   return stats;
 };
 
-// Reset leave balances for new academic year
 studentSchema.statics.resetLeaveBalances = async function(academicYear) {
   const result = await this.updateMany(
     { status: 'Active' },
@@ -1095,7 +1065,6 @@ studentSchema.statics.resetLeaveBalances = async function(academicYear) {
   };
 };
 
-// Get students with recurring fees due for generation
 studentSchema.statics.getStudentsForRecurringFeeGeneration = async function(month) {
   const targetMonth = month || new Date().toISOString().slice(0, 7);
   
@@ -1120,12 +1089,10 @@ studentSchema.statics.getStudentsForRecurringFeeGeneration = async function(mont
 
 // ==================== VIRTUAL PROPERTIES ====================
 
-// Virtual for full name with class
 studentSchema.virtual('fullNameWithClass').get(function() {
   return `${this.name} (${this.class_id || 'No Class'} - Section ${this.section || 'A'})`;
 });
 
-// Virtual for leave status
 studentSchema.virtual('leaveStatus').get(function() {
   const totalLeaves = this.leave_summary.total_leaves || 0;
   const pendingLeaves = this.leave_summary.pending_leaves || 0;
@@ -1135,7 +1102,6 @@ studentSchema.virtual('leaveStatus').get(function() {
   return 'Has Leave History';
 });
 
-// Virtual for attendance status
 studentSchema.virtual('attendanceStatus').get(function() {
   const percentage = this.attendance.attendance_percentage || 0;
   if (percentage >= 90) return 'Excellent';
@@ -1145,7 +1111,6 @@ studentSchema.virtual('attendanceStatus').get(function() {
   return 'Needs Improvement';
 });
 
-// Virtual for fee status - now properly synced with Fee collection
 studentSchema.virtual('feeStatus').get(function() {
   const total = this.total_amount || 0;
   const paid = this.fee_paid ? total : 0;
@@ -1156,7 +1121,6 @@ studentSchema.virtual('feeStatus').get(function() {
   return 'Unpaid';
 });
 
-// Ensure virtuals are included in JSON output
 studentSchema.set('toJSON', { virtuals: true });
 studentSchema.set('toObject', { virtuals: true });
 

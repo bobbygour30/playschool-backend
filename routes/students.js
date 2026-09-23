@@ -10,7 +10,6 @@ const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
 // ==================== FEE STRUCTURE DEFINITIONS ====================
-// Adjust the amounts to match your actual fee plans
 const FEE_STRUCTURES = {
   playgroup: {
     name: 'Playgroup Fee Plan',
@@ -49,7 +48,6 @@ const FEE_STRUCTURES = {
   },
 };
 
-// Helper function to convert to ObjectId safely
 const toObjectId = (id) => {
   if (!id) return null;
   try {
@@ -59,7 +57,6 @@ const toObjectId = (id) => {
   }
 };
 
-// Helper function to sync student to mobile backend
 const syncStudentToMobile = async (studentData, isDelete = false) => {
   if (!process.env.MOBILE_BACKEND_URL) {
     console.log('MOBILE_BACKEND_URL not configured, skipping sync');
@@ -79,7 +76,7 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
       return { success: true, data: response.data };
     } else {
       const payload = {
-          webStudentId: studentData._id.toString(),   // NEW - stable identity
+          webStudentId: studentData._id.toString(),
         name: studentData.name,
         rollNumber: studentData.rollNumber,
         class_id: studentData.class_id,
@@ -114,7 +111,6 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
         enrollment_type: studentData.enrollment_type || 'New Admission',
         previous_class: studentData.previous_class || '',
         fee_structure: studentData.fee_structure || null,
-        // Recurring fees
         recurring_fees: studentData.recurring_fees || {},
       };
       
@@ -141,7 +137,6 @@ const createInitialFeeInvoice = async (studentData, paymentInfo) => {
   try {
     const Fee = require('../models/Fee');
     
-    // Check if initial invoice already exists
     const existingInvoice = await Fee.findOne({
       student_id: studentData._id,
       status: 'Paid',
@@ -152,15 +147,15 @@ const createInitialFeeInvoice = async (studentData, paymentInfo) => {
       return { success: false, message: 'Initial invoice already exists', invoice: existingInvoice };
     }
     
-    // Calculate monthly total from recurring fees
     const monthlyTotal = (studentData.recurring_fees?.total_monthly || 0);
     const amount = paymentInfo?.initial_payment_amount || monthlyTotal;
     const paymentMethod = paymentInfo?.payment_mode || 'Cash';
     const paymentDate = paymentInfo?.payment_date || new Date();
     const transactionId = paymentInfo?.transaction_id || '';
     const startMonth = studentData.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
+    const dueDay = studentData.recurring_fees?.monthly_due_day || 5;
+    const dueDate = Fee.computeDueDate(startMonth, dueDay);
     
-    // Create the invoice
     const invoiceData = {
       student_id: studentData._id,
       registration_fee: studentData.registration_fee || 0,
@@ -169,7 +164,7 @@ const createInitialFeeInvoice = async (studentData, paymentInfo) => {
       activity_fee: studentData.recurring_fees?.activity_fee || 0,
       transport_fee: studentData.recurring_fees?.transport_fee || 0,
       total_amount: amount,
-      due_date: new Date(),
+      due_date: dueDate,
       status: 'Paid',
       payment_date: paymentDate,
       payment_method: paymentMethod,
@@ -192,19 +187,18 @@ const createInitialFeeInvoice = async (studentData, paymentInfo) => {
         activity_fee: studentData.recurring_fees?.activity_fee || 0,
         transport_fee: studentData.recurring_fees?.transport_fee || 0,
         total_monthly: studentData.recurring_fees?.total_monthly || 0,
+        monthly_due_day: dueDay,
       },
     };
     
     const invoice = new Fee(invoiceData);
     await invoice.save();
     
-    // Update student's fee_paid status
     studentData.fee_paid = true;
     studentData.payment_date = paymentDate;
     studentData.payment_mode = paymentMethod;
     studentData.total_amount = amount;
     
-    // Update recurring fees initial payment info
     studentData.recurring_fees.initial_payment = {
       amount: amount,
       paid: true,
@@ -214,7 +208,6 @@ const createInitialFeeInvoice = async (studentData, paymentInfo) => {
       transaction_id: transactionId,
     };
     
-    // Update last generated month
     studentData.recurring_fees.last_generated_month = startMonth;
     
     await studentData.save();
@@ -233,7 +226,6 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       student_id: studentData._id 
     });
     
-    // Check if there's already an initial invoice
     const initialInvoice = await Fee.findOne({
       student_id: studentData._id,
       status: 'Paid',
@@ -250,7 +242,6 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       (studentData.camera_fee || 0);
     const totalAmount = Math.max(0, subtotal - (studentData.discount || 0));
     
-    // If there's an initial invoice, use that status
     let status = studentData.fee_paid ? 'Paid' : 'Pending';
     let paidAmount = 0;
     let remainingAmount = totalAmount;
@@ -260,6 +251,10 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       paidAmount = initialInvoice.total_amount || totalAmount;
       remainingAmount = Math.max(0, totalAmount - paidAmount);
     }
+    
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    const dueDay = studentData.recurring_fees?.monthly_due_day || 5;
+    const dueDate = Fee.computeDueDate(currentMonth, dueDay);
     
     const feeData = {
       student_id: studentData._id,
@@ -275,7 +270,7 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       total_amount: totalAmount,
       paid_amount: paidAmount,
       remaining_amount: remainingAmount,
-      due_date: studentData.enrollment_date || new Date(),
+      due_date: dueDate,
       status: status,
       payment_date: studentData.payment_date || null,
       payment_method: studentData.payment_mode || 'Cash',
@@ -283,9 +278,9 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
         `Auto-created from student registration - ${studentData.name} (Initial invoice: ${initialInvoice.invoice_number})` :
         `Auto-created from student registration - ${studentData.name}`,
       fee_period: {
-        month: new Date().toISOString().slice(0, 7),
-        start_date: new Date(),
-        end_date: new Date(new Date().setMonth(new Date().getMonth() + 1) - 1),
+        month: currentMonth,
+        start_date: new Date(currentMonth + '-01'),
+        end_date: new Date(new Date(currentMonth + '-01').setMonth(new Date(currentMonth + '-01').getMonth() + 1) - 1),
       },
       fee_plan: studentData.recurring_fees?.fee_plan || 'Monthly',
       is_recurring: true,
@@ -294,11 +289,11 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
         activity_fee: studentData.recurring_fees?.activity_fee || 0,
         transport_fee: studentData.recurring_fees?.transport_fee || 0,
         total_monthly: studentData.recurring_fees?.total_monthly || 0,
+        monthly_due_day: dueDay,
       },
     };
     
     if (existingFee) {
-      // Don't override if there's an initial invoice
       if (!initialInvoice || existingFee.status === 'Pending') {
         const updatedFee = await Fee.findByIdAndUpdate(
           existingFee._id,
@@ -347,12 +342,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ==================== GET FEE STRUCTURES (helper for frontend) ====================
 router.get('/fee-structures', (req, res) => {
   res.json(FEE_STRUCTURES);
 });
 
-// ==================== GET STUDENTS BY CLASS ====================
 router.get('/class/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
@@ -370,7 +363,6 @@ router.get('/class/:classId', async (req, res) => {
   }
 });
 
-// ==================== GET STUDENT BY ID ====================
 router.get('/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id)
@@ -395,7 +387,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ==================== GET STUDENTS BY TEACHER ====================
 router.get('/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
@@ -418,7 +409,6 @@ router.get('/teacher/:teacherId', async (req, res) => {
   }
 });
 
-// ==================== GET CLASS-WISE STATISTICS ====================
 router.get('/stats/class-wise', async (req, res) => {
   try {
     const classes = ['playgroup', 'nursery', 'lkg', 'ukg'];
@@ -437,7 +427,6 @@ router.get('/stats/class-wise', async (req, res) => {
   }
 });
 
-// ==================== GET FEE STATISTICS ====================
 router.get('/stats/fee-summary', async (req, res) => {
   try {
     const totalStudents = await Student.countDocuments();
@@ -487,7 +476,6 @@ router.get('/stats/fee-summary', async (req, res) => {
   }
 });
 
-// ==================== GET FEE BREAKDOWN BY STUDENT ====================
 router.get('/fee-breakdown/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id);
@@ -563,12 +551,10 @@ router.post('/', async (req, res) => {
       payment_date,
       payment_mode,
       authorized_pickup,
-      fee_structure,          // NEW
-      // Recurring fees fields
+      fee_structure,
       recurring_fees,
     } = req.body;
     
-    // Validate mandatory documents
     if (!documents?.student_photo) {
       return res.status(400).json({ message: 'Student Photo is mandatory' });
     }
@@ -579,7 +565,6 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Parent Aadhar Card is mandatory' });
     }
     
-    // Validate emergency contact
     if (!emergency_contact?.name || !emergency_contact?.relationship || !emergency_contact?.phone) {
       return res.status(400).json({ message: 'Emergency Contact is required with name, relationship, and phone' });
     }
@@ -587,7 +572,6 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Emergency Contact phone must be exactly 10 digits' });
     }
     
-    // Validate enrollment information
     if (!admission_date) {
       return res.status(400).json({ message: 'Admission Date is required' });
     }
@@ -598,21 +582,18 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Enrollment Type is required' });
     }
     
-    // Validate previous class for Transfer or Returning
     if ((enrollment_type === 'Transfer' || enrollment_type === 'Returning') && !previous_class) {
       return res.status(400).json({ 
         message: 'Previous Class is required for Transfer or Returning students' 
       });
     }
     
-    // Validate authorized pickup if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
       if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
         return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
       }
     }
     
-    // Verify teacher exists if provided
     if (assigned_teacher_id) {
       const teacherExists = await Staff.findById(assigned_teacher_id);
       if (!teacherExists) {
@@ -620,7 +601,6 @@ router.post('/', async (req, res) => {
       }
     }
     
-    // Upload documents to Cloudinary if provided
     const uploadedDocuments = {};
     
     if (documents) {
@@ -650,20 +630,16 @@ router.post('/', async (req, res) => {
       }
     }
     
-    // Determine class type
     let classType = 'standard';
     if (class_id && !STANDARD_CLASSES[class_id]) {
       classType = 'custom';
     }
     
-    // ==================== APPLY FEE STRUCTURE ====================
     let regFee = parseFloat(registration_fee);
     let admFee = parseFloat(admission_fee);
     let kitFee = parseFloat(kit_fee);
     let camFee = parseFloat(camera_fee);
 
-    // If a fee structure is selected and the corresponding fee was not explicitly provided,
-    // auto-fill from the structure.
     if (fee_structure && FEE_STRUCTURES[fee_structure]) {
       const structure = FEE_STRUCTURES[fee_structure];
       if (isNaN(regFee)) regFee = structure.registration_fee;
@@ -672,7 +648,6 @@ router.post('/', async (req, res) => {
       if (isNaN(camFee)) camFee = structure.camera_fee;
     }
 
-    // Fallback to 0
     regFee = isNaN(regFee) ? 0 : regFee;
     admFee = isNaN(admFee) ? 0 : admFee;
     kitFee = isNaN(kitFee) ? 0 : kitFee;
@@ -685,11 +660,14 @@ router.post('/', async (req, res) => {
     const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     const totalAmount = Math.max(0, subtotal - disc);
     
-    // Calculate recurring fees total
     const recurringTotal = 
       (recurring_fees?.tuition_fee || 0) + 
       (recurring_fees?.activity_fee || 0) + 
       (recurring_fees?.transport_fee || 0);
+
+    const monthlyDueDay = recurring_fees?.monthly_due_day
+      ? Math.min(Math.max(parseInt(recurring_fees.monthly_due_day) || 5, 1), 31)
+      : 5;
     
     const studentData = {
       name,
@@ -722,7 +700,7 @@ router.post('/', async (req, res) => {
       vendor_id: transport_type !== 'Walker' ? vendor_id : null,
       status: status || 'Active',
       documents: uploadedDocuments,
-      fee_structure: fee_structure || null,          // NEW
+      fee_structure: fee_structure || null,
       registration_fee: regFee,
       admission_fee: admFee,
       tuition_fee: tuiFee,
@@ -737,7 +715,6 @@ router.post('/', async (req, res) => {
       fee_exempt: fee_exempt || false,
       payment_date: payment_date ? new Date(payment_date) : null,
       payment_mode: payment_mode || 'Cash',
-      // Recurring fees
       recurring_fees: {
         tuition_fee: recurring_fees?.tuition_fee || 0,
         activity_fee: recurring_fees?.activity_fee || 0,
@@ -745,6 +722,7 @@ router.post('/', async (req, res) => {
         total_monthly: recurringTotal,
         start_month: recurring_fees?.start_month || new Date().toISOString().slice(0, 7),
         end_month: recurring_fees?.end_month || null,
+        monthly_due_day: monthlyDueDay,
         fee_plan: recurring_fees?.fee_plan || 'Monthly',
         auto_generate: recurring_fees?.auto_generate !== undefined ? recurring_fees.auto_generate : true,
         last_generated_month: null,
@@ -759,26 +737,24 @@ router.post('/', async (req, res) => {
       },
     };
     
-    // Add authorized pickup only if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
       const hasPickupData = authorized_pickup.name || authorized_pickup.relationship || authorized_pickup.phone;
       if (hasPickupData) {
         studentData.authorized_pickup = {
           name: authorized_pickup.name || null,
-          relationship: authorized_pickup.relationship || '',   // '' not null
+          relationship: authorized_pickup.relationship || '',
           phone: authorized_pickup.phone || null,
         };
       } else {
         studentData.authorized_pickup = null;
       }
     } else {
-      studentData.authorized_pickup = null;   // Always explicitly set
+      studentData.authorized_pickup = null;
     }
     
     const student = new Student(studentData);
     const savedStudent = await student.save();
     
-    // Create initial invoice and payment record if fee is paid or initial payment is provided
     let initialInvoiceResult = null;
     if (fee_paid && !fee_exempt && recurringTotal > 0) {
       const paymentInfo = {
@@ -790,9 +766,10 @@ router.post('/', async (req, res) => {
       initialInvoiceResult = await createInitialFeeInvoice(savedStudent, paymentInfo);
       console.log(`📄 Initial invoice created for ${savedStudent.name}: ${initialInvoiceResult.success ? 'Success' : 'Failed'}`);
     } else if (recurringTotal > 0 && !fee_exempt) {
-      // Create the invoice but mark as pending if not paid
       const Fee = require('../models/Fee');
       const startMonth = savedStudent.recurring_fees?.start_month || new Date().toISOString().slice(0, 7);
+      const dueDay = savedStudent.recurring_fees?.monthly_due_day || 5;
+      const dueDate = Fee.computeDueDate(startMonth, dueDay);
       
       const invoiceData = {
         student_id: savedStudent._id,
@@ -802,8 +779,7 @@ router.post('/', async (req, res) => {
         activity_fee: savedStudent.recurring_fees?.activity_fee || 0,
         transport_fee: savedStudent.recurring_fees?.transport_fee || 0,
         total_amount: recurringTotal,
-        due_date: new Date(),
-        status: 'Pending',
+        due_date: dueDate,
         notes: `Initial invoice for ${savedStudent.name} - ${startMonth} (Pending)`,
         fee_period: {
           start_date: new Date(startMonth + '-01'),
@@ -814,30 +790,26 @@ router.post('/', async (req, res) => {
         is_recurring: true,
         generated_for_month: startMonth,
         paid_amount: 0,
-        remaining_amount: recurringTotal,
         advance_amount: 0,
-        overdue_amount: 0,
         recurring_fees: {
           tuition_fee: savedStudent.recurring_fees?.tuition_fee || 0,
           activity_fee: savedStudent.recurring_fees?.activity_fee || 0,
           transport_fee: savedStudent.recurring_fees?.transport_fee || 0,
           total_monthly: savedStudent.recurring_fees?.total_monthly || 0,
+          monthly_due_day: dueDay,
         },
       };
       
       const invoice = new Fee(invoiceData);
       await invoice.save();
-      console.log(`📄 Initial pending invoice created for ${savedStudent.name}`);
+      console.log(`📄 Initial invoice created for ${savedStudent.name} (status: ${invoice.status})`);
     }
     
-    // Sync student fees to finance module
     const feeSyncResult = await syncStudentFeesToFinance(savedStudent, false);
     console.log(`💰 Fee sync result for ${savedStudent.name}: ${feeSyncResult.action}`);
     
-    // Sync to mobile backend
     const syncResult = await syncStudentToMobile(savedStudent);
     
-    // Populate the teacher data before returning
     const populatedStudent = await Student.findById(savedStudent._id)
       .populate({
         path: 'assigned_teacher_id',
@@ -907,11 +879,10 @@ router.put('/:id', async (req, res) => {
       payment_date,
       payment_mode,
       authorized_pickup,
-      fee_structure,          // NEW
+      fee_structure,
       recurring_fees,
     } = req.body;
     
-    // Verify teacher exists if provided
     if (assigned_teacher_id) {
       const teacherExists = await Staff.findById(assigned_teacher_id);
       if (!teacherExists) {
@@ -919,7 +890,6 @@ router.put('/:id', async (req, res) => {
       }
     }
     
-    // Validate emergency contact if provided
     if (emergency_contact) {
       if (!emergency_contact.name || !emergency_contact.relationship || !emergency_contact.phone) {
         return res.status(400).json({ message: 'Emergency Contact requires name, relationship, and phone' });
@@ -929,26 +899,22 @@ router.put('/:id', async (req, res) => {
       }
     }
     
-    // Validate enrollment information
     if (admission_date && !academic_year) {
       return res.status(400).json({ message: 'Academic Year is required when Admission Date is provided' });
     }
     
-    // Validate previous class for Transfer or Returning
     if ((enrollment_type === 'Transfer' || enrollment_type === 'Returning') && !previous_class) {
       return res.status(400).json({ 
         message: 'Previous Class is required for Transfer or Returning students' 
       });
     }
     
-    // Validate authorized pickup if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
       if (authorized_pickup.phone && !/^\d{10}$/.test(authorized_pickup.phone)) {
         return res.status(400).json({ message: 'Authorized Pickup phone must be exactly 10 digits' });
       }
     }
     
-    // Handle document updates
     const updatedDocuments = { ...existingStudent.documents };
     
     if (documents) {
@@ -990,13 +956,11 @@ router.put('/:id', async (req, res) => {
       }
     }
     
-    // Determine class type
     let classType = 'standard';
     if (class_id && !STANDARD_CLASSES[class_id]) {
       classType = 'custom';
     }
     
-    // ==================== APPLY FEE STRUCTURE ON UPDATE ====================
     let regFee = parseFloat(registration_fee);
     let admFee = parseFloat(admission_fee);
     let kitFee = parseFloat(kit_fee);
@@ -1010,7 +974,6 @@ router.put('/:id', async (req, res) => {
       if (isNaN(camFee)) camFee = structure.camera_fee;
     }
 
-    // Fall back to existing values if still NaN
     regFee = isNaN(regFee) ? (existingStudent.registration_fee || 0) : regFee;
     admFee = isNaN(admFee) ? (existingStudent.admission_fee || 0) : admFee;
     kitFee = isNaN(kitFee) ? (existingStudent.kit_fee || 0) : kitFee;
@@ -1032,11 +995,14 @@ router.put('/:id', async (req, res) => {
     const subtotal = regFee + admFee + tuiFee + actFee + kitFee + cabFee + camFee;
     const totalAmount = Math.max(0, subtotal - disc);
     
-    // Calculate recurring fees total
     const recurringTotal = 
       (recurring_fees?.tuition_fee || existingStudent.recurring_fees?.tuition_fee || 0) + 
       (recurring_fees?.activity_fee || existingStudent.recurring_fees?.activity_fee || 0) + 
       (recurring_fees?.transport_fee || existingStudent.recurring_fees?.transport_fee || 0);
+
+    const monthlyDueDay = recurring_fees?.monthly_due_day !== undefined
+      ? Math.min(Math.max(parseInt(recurring_fees.monthly_due_day) || 5, 1), 31)
+      : (existingStudent.recurring_fees?.monthly_due_day || 5);
     
     const studentData = {
       name,
@@ -1069,7 +1035,7 @@ router.put('/:id', async (req, res) => {
       vendor_id: transport_type !== 'Walker' ? vendor_id : null,
       status: status || 'Active',
       documents: updatedDocuments,
-      fee_structure: fee_structure !== undefined ? fee_structure : existingStudent.fee_structure, // NEW
+      fee_structure: fee_structure !== undefined ? fee_structure : existingStudent.fee_structure,
       registration_fee: regFee,
       admission_fee: admFee,
       tuition_fee: tuiFee,
@@ -1092,6 +1058,7 @@ router.put('/:id', async (req, res) => {
         total_monthly: recurringTotal,
         start_month: recurring_fees?.start_month || existingStudent.recurring_fees?.start_month || new Date().toISOString().slice(0, 7),
         end_month: recurring_fees?.end_month !== undefined ? recurring_fees.end_month : existingStudent.recurring_fees?.end_month || null,
+        monthly_due_day: monthlyDueDay,
         fee_plan: recurring_fees?.fee_plan || existingStudent.recurring_fees?.fee_plan || 'Monthly',
         auto_generate: recurring_fees?.auto_generate !== undefined ? recurring_fees.auto_generate : (existingStudent.recurring_fees?.auto_generate !== undefined ? existingStudent.recurring_fees.auto_generate : true),
         last_generated_month: existingStudent.recurring_fees?.last_generated_month || null,
@@ -1106,13 +1073,12 @@ router.put('/:id', async (req, res) => {
       },
     };
     
-    // Add authorized pickup only if Walker and has data
     if (transport_type === 'Walker' && authorized_pickup) {
       const hasPickupData = authorized_pickup.name || authorized_pickup.relationship || authorized_pickup.phone;
       if (hasPickupData) {
         studentData.authorized_pickup = {
           name: authorized_pickup.name || null,
-          relationship: authorized_pickup.relationship || '',   // '' not null
+          relationship: authorized_pickup.relationship || '',
           phone: authorized_pickup.phone || null,
         };
       } else {
@@ -1132,11 +1098,9 @@ router.put('/:id', async (req, res) => {
       select: 'name designation email phone role'
     });
     
-    // Sync student fees to finance module
     const feeSyncResult = await syncStudentFeesToFinance(student, true);
     console.log(`💰 Fee sync result for ${student.name}: ${feeSyncResult.action}`);
     
-    // Sync to mobile backend
     const syncResult = await syncStudentToMobile(student);
     
     const responseData = student.toObject();
@@ -1189,12 +1153,12 @@ router.patch('/:id/fee', async (req, res) => {
       const existingFee = await Fee.findOne({ student_id: student._id });
       if (existingFee) {
         await Fee.findByIdAndUpdate(existingFee._id, {
-          status: fee_paid ? 'Paid' : 'Pending',
           payment_date: student.payment_date,
           payment_method: student.payment_mode,
           discount: student.discount,
           fee_frequency: student.fee_frequency,
           total_amount: student.total_amount,
+          paid_amount: fee_paid ? student.total_amount : (existingFee.paid_amount || 0),
           updated_at: Date.now()
         });
         console.log(`💰 Fee status updated for ${student.name} in finance module`);
@@ -1346,7 +1310,6 @@ router.post('/sync-to-mobile', async (req, res) => {
   }
 });
 
-// ==================== SYNC SINGLE STUDENT TO MOBILE ====================
 router.post('/:id/sync-to-mobile', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id);
@@ -1371,7 +1334,6 @@ router.post('/:id/sync-to-mobile', async (req, res) => {
   }
 });
 
-// ==================== SYNC ALL STUDENT FEES TO FINANCE ====================
 router.post('/sync-fees-to-finance', async (req, res) => {
   try {
     const students = await Student.find();

@@ -7,9 +7,12 @@ const Student = require('../models/Student');
 const Staff = require('../models/Staff');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
+// Returns a plain object with live status/balance merged in.
+const toLive = (feeDoc) =>
+  feeDoc && typeof feeDoc.toLiveJSON === 'function' ? feeDoc.toLiveJSON() : feeDoc;
+
 // ==================== FEE MANAGEMENT ====================
 
-// Get all fees with filters and pagination
 router.get('/fees', async (req, res) => {
   try {
     const { 
@@ -51,7 +54,7 @@ router.get('/fees', async (req, res) => {
     ]);
     
     res.json({
-      data: fees,
+      data: fees.map(toLive),
       pagination: {
         total,
         page: parseInt(page),
@@ -65,7 +68,6 @@ router.get('/fees', async (req, res) => {
 });
 
 // ==================== FEE SUMMARY - MUST COME BEFORE /fees/:id ====================
-// Get fee summary for a specific fee record (for payment modal)
 router.get('/fees/:id/summary', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id)
@@ -78,22 +80,16 @@ router.get('/fees/:id/summary', async (req, res) => {
       });
     }
 
-    const totalAmount = fee.total_amount || 0;
-    const paidAmount = fee.paid_amount || 0;
-    const remainingAmount = totalAmount - paidAmount;
-    const overdueAmount = fee.overdue_amount || 0;
-    const advanceAmount = fee.advance_amount || 0;
-    const dueDate = fee.due_date;
-    const feePeriod = fee.fee_period;
-    const status = fee.status;
-    const invoiceNumber = fee.invoice_number;
-    const isOverdue = new Date(dueDate) < new Date() && remainingAmount > 0;
+    const live = fee.computeLiveStatus();
+    const isOverdue = live.status === 'Overdue';
 
-    // Determine payment type automatically
+    // Payment type suggestion is based on the REAL remaining amount, not the
+    // date-gated balance_due — this lets a parent pay an upcoming invoice
+    // early with the correct amount pre-filled.
     let suggestedPaymentType = 'full';
-    if (remainingAmount <= 0) {
+    if (live.remaining_amount <= 0) {
       suggestedPaymentType = 'full';
-    } else if (paidAmount > 0 && remainingAmount > 0) {
+    } else if ((fee.paid_amount || 0) > 0 && live.remaining_amount > 0) {
       suggestedPaymentType = 'partial';
     }
 
@@ -103,16 +99,20 @@ router.get('/fees/:id/summary', async (req, res) => {
         fee_id: fee._id,
         student_name: fee.student_id?.name || 'Unknown',
         student_class: fee.student_id?.class_id || 'N/A',
-        invoice_number: invoiceNumber,
-        fee_period: feePeriod,
-        due_date: dueDate,
-        total_amount: totalAmount,
-        paid_amount: paidAmount,
-        remaining_amount: remainingAmount,
-        overdue_amount: overdueAmount,
-        advance_amount: advanceAmount,
-        status: status,
+        invoice_number: fee.invoice_number,
+        fee_period: fee.fee_period,
+        due_date: fee.due_date,
+        total_amount: fee.total_amount || 0,
+        paid_amount: fee.paid_amount || 0,
+        // Real outstanding amount — always payable, regardless of due date.
+        remaining_amount: live.remaining_amount,
+        // Date-gated display balance (matches the finance table).
+        balance_due: live.balance_due,
+        overdue_amount: live.overdue_amount,
+        advance_amount: fee.advance_amount || 0,
+        status: live.status,
         is_overdue: isOverdue,
+        is_upcoming: live.status === 'Upcoming',
         suggested_payment_type: suggestedPaymentType,
       }
     });
@@ -126,12 +126,11 @@ router.get('/fees/:id/summary', async (req, res) => {
 });
 
 // ==================== GET PAYMENT HISTORY - MUST COME BEFORE /fees/:id ====================
-// Get payment history for a fee with full details
 router.get('/fees/:id/payments', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id)
       .populate('student_id', 'name parent_name class_id recurring_fees')
-      .select('payment_history student_id total_amount paid_amount remaining_amount overdue_amount advance_amount status invoice_number invoice_date fee_period');
+      .select('payment_history student_id total_amount paid_amount remaining_amount overdue_amount advance_amount status invoice_number invoice_date fee_period due_date');
 
     if (!fee) {
       return res.status(404).json({ 
@@ -140,7 +139,8 @@ router.get('/fees/:id/payments', async (req, res) => {
       });
     }
 
-    // Get all related invoices for this student
+    const live = fee.computeLiveStatus();
+
     const relatedInvoices = await Fee.find({
       student_id: fee.student_id._id,
       _id: { $ne: fee._id },
@@ -156,15 +156,17 @@ router.get('/fees/:id/payments', async (req, res) => {
           invoice_number: fee.invoice_number,
           invoice_date: fee.invoice_date,
           fee_period: fee.fee_period,
+          due_date: fee.due_date,
           total_amount: fee.total_amount,
           paid_amount: fee.paid_amount,
-          remaining_amount: fee.remaining_amount,
-          overdue_amount: fee.overdue_amount,
+          remaining_amount: live.remaining_amount,
+          balance_due: live.balance_due,
+          overdue_amount: live.overdue_amount,
           advance_amount: fee.advance_amount,
-          status: fee.status,
+          status: live.status,
         },
         student: fee.student_id,
-        related_invoices: relatedInvoices,
+        related_invoices: relatedInvoices.map(toLive),
         payment_history: fee.payment_history.sort((a, b) => b.recorded_at - a.recorded_at),
       },
     });
@@ -178,7 +180,6 @@ router.get('/fees/:id/payments', async (req, res) => {
 });
 
 // ==================== GET FEE BY ID - MUST COME AFTER SPECIFIC ROUTES ====================
-// Get fee by ID with full details
 router.get('/fees/:id', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id)
@@ -188,15 +189,14 @@ router.get('/fees/:id', async (req, res) => {
       return res.status(404).json({ message: 'Fee record not found' });
     }
     
-    // Get all related invoices for this student
     const relatedFees = await Fee.find({
       student_id: fee.student_id._id,
       _id: { $ne: fee._id },
     }).sort({ due_date: -1 });
     
     res.json({
-      ...fee.toObject(),
-      related_invoices: relatedFees,
+      ...toLive(fee),
+      related_invoices: relatedFees.map(toLive),
     });
   } catch (error) {
     console.error('Error fetching fee:', error);
@@ -204,7 +204,6 @@ router.get('/fees/:id', async (req, res) => {
   }
 });
 
-// Get fees by student with detailed breakdown
 router.get('/fees/student/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
@@ -218,23 +217,22 @@ router.get('/fees/student/:studentId', async (req, res) => {
     const fees = await Fee.find(query)
       .sort({ due_date: -1 });
     
-    // Get student details
     const student = await Student.findById(studentId);
     
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
     }
     
-    // Calculate totals
-    const totalCharged = fees.reduce((sum, f) => sum + (f.total_amount || 0), 0);
-    const totalPaid = fees.reduce((sum, f) => sum + (f.paid_amount || 0), 0);
-    const totalRemaining = fees.reduce((sum, f) => sum + (f.remaining_amount || 0), 0);
-    const totalOverdue = fees.reduce((sum, f) => sum + (f.overdue_amount || 0), 0);
-    const totalAdvance = fees.reduce((sum, f) => sum + (f.advance_amount || 0), 0);
+    const liveFees = fees.map(toLive);
     
-    // Get current month fee
+    const totalCharged = liveFees.reduce((sum, f) => sum + (f.total_amount || 0), 0);
+    const totalPaid = liveFees.reduce((sum, f) => sum + (f.paid_amount || 0), 0);
+    const totalRemaining = liveFees.reduce((sum, f) => sum + (f.remaining_amount || 0), 0);
+    const totalOverdue = liveFees.reduce((sum, f) => sum + (f.overdue_amount || 0), 0);
+    const totalAdvance = liveFees.reduce((sum, f) => sum + (f.advance_amount || 0), 0);
+    
     const currentMonth = new Date().toISOString().slice(0, 7);
-    const currentMonthFee = await Fee.findOne({
+    const currentMonthFeeDoc = await Fee.findOne({
       student_id: studentId,
       'fee_period.month': currentMonth,
     });
@@ -252,9 +250,9 @@ router.get('/fees/student/:studentId', async (req, res) => {
         total_remaining: totalRemaining,
         total_overdue: totalOverdue,
         total_advance: totalAdvance,
-        current_month_fee: currentMonthFee || null,
+        current_month_fee: currentMonthFeeDoc ? toLive(currentMonthFeeDoc) : null,
       },
-      invoices: fees,
+      invoices: liveFees,
     });
   } catch (error) {
     console.error('Error fetching student fees:', error);
@@ -264,7 +262,6 @@ router.get('/fees/student/:studentId', async (req, res) => {
 
 // ==================== RECURRING FEE GENERATION ====================
 
-// Generate recurring fees for a student
 router.post('/fees/generate-recurring', async (req, res) => {
   try {
     const { studentId, months = 1, startMonth } = req.body;
@@ -280,7 +277,8 @@ router.post('/fees/generate-recurring', async (req, res) => {
         message: 'No recurring fees configured for this student' 
       });
     }
-    
+
+    const dueDay = student.recurring_fees.monthly_due_day || 5;
     const startDate = startMonth ? new Date(startMonth + '-01') : new Date();
     const generatedInvoices = [];
     
@@ -289,7 +287,6 @@ router.post('/fees/generate-recurring', async (req, res) => {
       month.setMonth(month.getMonth() + i);
       const monthStr = month.toISOString().slice(0, 7);
       
-      // Check if invoice already exists for this month
       const existingInvoice = await Fee.findOne({
         student_id: studentId,
         'fee_period.month': monthStr,
@@ -304,7 +301,8 @@ router.post('/fees/generate-recurring', async (req, res) => {
             tuition_fee: student.recurring_fees.tuition_fee || 0,
             activity_fee: student.recurring_fees.activity_fee || 0,
             transport_fee: student.recurring_fees.transport_fee || 0,
-          }
+          },
+          dueDay
         );
         generatedInvoices.push(invoice);
       }
@@ -313,7 +311,7 @@ router.post('/fees/generate-recurring', async (req, res) => {
     res.json({
       success: true,
       message: `Generated ${generatedInvoices.length} recurring invoices`,
-      invoices: generatedInvoices,
+      invoices: generatedInvoices.map(toLive),
     });
   } catch (error) {
     console.error('Error generating recurring fees:', error);
@@ -323,7 +321,6 @@ router.post('/fees/generate-recurring', async (req, res) => {
 
 // ==================== PAYMENT RECORDING WITH ADVANCE HANDLING ====================
 
-// Record a payment against a fee with advance handling
 router.post('/fees/record-payment', async (req, res) => {
   try {
     const {
@@ -335,7 +332,7 @@ router.post('/fees/record-payment', async (req, res) => {
       transaction_no,
       notes,
       recorded_by,
-      advance_allocation, // For advance payments: [{month: '2024-10', amount: 2100}, ...]
+      advance_allocation,
       generate_future_invoices = false,
     } = req.body;
 
@@ -365,7 +362,6 @@ router.post('/fees/record-payment', async (req, res) => {
     const paidAmount = fee.paid_amount || 0;
     const remaining = totalAmount - paidAmount;
     
-    // Determine payment type automatically
     let paymentType = 'full';
     if (amount_paid > remaining) {
       paymentType = 'advance';
@@ -375,14 +371,11 @@ router.post('/fees/record-payment', async (req, res) => {
       paymentType = 'full';
     }
 
-    // Handle advance payment
     let advanceAllocation = [];
     if (paymentType === 'advance' || amount_paid > remaining) {
-      // Calculate advance amount
       const advanceAmount = amount_paid - (remaining > 0 ? remaining : 0);
       
       if (advanceAmount > 0 && advance_allocation && advance_allocation.length > 0) {
-        // Validate advance allocation
         const totalAllocated = advance_allocation.reduce((sum, a) => sum + a.amount, 0);
         if (totalAllocated !== advanceAmount) {
           return res.status(400).json({
@@ -393,12 +386,11 @@ router.post('/fees/record-payment', async (req, res) => {
         
         advanceAllocation = advance_allocation;
         
-        // Generate future invoices for advance allocation
         if (generate_future_invoices) {
           const student = await Student.findById(student_id);
+          const dueDay = student?.recurring_fees?.monthly_due_day || 5;
           if (student && student.recurring_fees) {
             for (const allocation of advanceAllocation) {
-              // Check if invoice exists for that month
               const existingInvoice = await Fee.findOne({
                 student_id,
                 'fee_period.month': allocation.month,
@@ -413,10 +405,10 @@ router.post('/fees/record-payment', async (req, res) => {
                     tuition_fee: student.recurring_fees.tuition_fee || 0,
                     activity_fee: student.recurring_fees.activity_fee || 0,
                     transport_fee: student.recurring_fees.transport_fee || 0,
-                  }
+                  },
+                  dueDay
                 );
                 
-                // Mark this invoice as paid with advance
                 await invoice.recordPayment({
                   amount: allocation.amount,
                   payment_method,
@@ -432,7 +424,6 @@ router.post('/fees/record-payment', async (req, res) => {
       }
     }
 
-    // Record the payment
     const paymentData = {
       amount: amount_paid,
       payment_date: payment_date ? new Date(payment_date) : new Date(),
@@ -446,14 +437,13 @@ router.post('/fees/record-payment', async (req, res) => {
 
     await fee.recordPayment(paymentData);
 
-    // Populate student info for response
     const updatedFee = await Fee.findById(fee_id)
       .populate('student_id', 'name parent_name class_id');
 
     res.status(201).json({
       success: true,
       message: 'Payment recorded successfully',
-      data: updatedFee,
+      data: toLive(updatedFee),
       payment_type: paymentType,
     });
 
@@ -468,18 +458,15 @@ router.post('/fees/record-payment', async (req, res) => {
 
 // ==================== ADVANCE PAYMENT ALLOCATION ====================
 
-// Allocate advance payment to future months
 router.post('/fees/allocate-advance', async (req, res) => {
   try {
     const { fee_id, allocations } = req.body;
-    // allocations: [{month: '2024-10', amount: 2100, invoice_id: '...'}, ...]
     
     const fee = await Fee.findById(fee_id);
     if (!fee) {
       return res.status(404).json({ success: false, message: 'Fee record not found' });
     }
     
-    // Update payment history with allocation
     if (fee.payment_history.length > 0) {
       const lastPayment = fee.payment_history[fee.payment_history.length - 1];
       lastPayment.advance_allocation = allocations;
@@ -499,7 +486,6 @@ router.post('/fees/allocate-advance', async (req, res) => {
 
 // ==================== BULK FEE OPERATIONS ====================
 
-// Bulk generate recurring fees for all students
 router.post('/fees/bulk-generate-recurring', async (req, res) => {
   try {
     const { month, students = [] } = req.body;
@@ -517,7 +503,6 @@ router.post('/fees/bulk-generate-recurring', async (req, res) => {
     for (const student of studentList) {
       try {
         if (student.recurring_fees && student.recurring_fees.total_monthly > 0) {
-          // Check if invoice already exists
           const existingInvoice = await Fee.findOne({
             student_id: student._id,
             'fee_period.month': targetMonth,
@@ -525,6 +510,7 @@ router.post('/fees/bulk-generate-recurring', async (req, res) => {
           });
           
           if (!existingInvoice) {
+            const dueDay = student.recurring_fees.monthly_due_day || 5;
             const invoice = await Fee.generateRecurringInvoices(
               student._id,
               targetMonth,
@@ -532,7 +518,8 @@ router.post('/fees/bulk-generate-recurring', async (req, res) => {
                 tuition_fee: student.recurring_fees.tuition_fee || 0,
                 activity_fee: student.recurring_fees.activity_fee || 0,
                 transport_fee: student.recurring_fees.transport_fee || 0,
-              }
+              },
+              dueDay
             );
             generatedInvoices.push(invoice);
           }
@@ -556,7 +543,6 @@ router.post('/fees/bulk-generate-recurring', async (req, res) => {
 
 // ==================== FEE CRUD ====================
 
-// Create fee record
 router.post('/fees', async (req, res) => {
   try {
     const {
@@ -587,11 +573,16 @@ router.post('/fees', async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
     
-    // Upload receipt if provided
     let uploadedReceipt = null;
     if (receipt_url) {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/receipts');
     }
+
+    const computedTotal = total_amount || 0;
+    // If status is manually set to 'Paid' when creating a record (no
+    // record-payment call involved), treat it as fully paid so the
+    // date-driven status calculation agrees with it.
+    const paidAmount = status === 'Paid' ? computedTotal : 0;
     
     const feeData = {
       student_id,
@@ -602,10 +593,10 @@ router.post('/fees', async (req, res) => {
       activity_fee: activity_fee || 0,
       kit_fee: kit_fee || 0,
       camera_fee: camera_fee || 0,
-      total_amount: total_amount || 0,
+      total_amount: computedTotal,
+      paid_amount: paidAmount,
       due_date: new Date(due_date),
-      status: status || 'Pending',
-      payment_date: payment_date ? new Date(payment_date) : null,
+      payment_date: status === 'Paid' ? (payment_date ? new Date(payment_date) : new Date()) : (payment_date ? new Date(payment_date) : null),
       payment_method: payment_method || 'Cash',
       transaction_id: transaction_id || '',
       notes: notes || '',
@@ -613,7 +604,7 @@ router.post('/fees', async (req, res) => {
       fee_period: fee_period || { month: due_date?.slice(0, 7) || new Date().toISOString().slice(0, 7) },
       fee_plan: fee_plan || 'Monthly',
       is_recurring: is_recurring || false,
-      recurring_fees: recurring_fees || { tuition_fee: 0, activity_fee: 0, transport_fee: 0, total_monthly: 0 },
+      recurring_fees: recurring_fees || { tuition_fee: 0, activity_fee: 0, transport_fee: 0, total_monthly: 0, monthly_due_day: 5 },
     };
     
     const fee = new Fee(feeData);
@@ -622,14 +613,13 @@ router.post('/fees', async (req, res) => {
     const populatedFee = await Fee.findById(savedFee._id)
       .populate('student_id', 'name parent_name class_id');
     
-    res.status(201).json(populatedFee);
+    res.status(201).json(toLive(populatedFee));
   } catch (error) {
     console.error('Error creating fee record:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// Update fee record
 router.put('/fees/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -660,7 +650,6 @@ router.put('/fees/:id', async (req, res) => {
       recurring_fees,
     } = req.body;
     
-    // Handle receipt update
     let uploadedReceipt = existingFee.receipt_url;
     if (receipt_url && receipt_url !== existingFee.receipt_url) {
       if (existingFee.receipt_url) {
@@ -668,6 +657,12 @@ router.put('/fees/:id', async (req, res) => {
       }
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/receipts');
     }
+
+    const computedTotal = total_amount || existingFee.total_amount;
+    // Manually flipping status to 'Paid' marks it fully paid; otherwise keep
+    // whatever paid_amount already exists (payments are normally recorded
+    // via the record-payment endpoint, not this form).
+    const paidAmount = status === 'Paid' ? computedTotal : (existingFee.paid_amount || 0);
     
     const feeData = {
       registration_fee: registration_fee || 0,
@@ -677,10 +672,10 @@ router.put('/fees/:id', async (req, res) => {
       activity_fee: activity_fee || 0,
       kit_fee: kit_fee || 0,
       camera_fee: camera_fee || 0,
-      total_amount: total_amount || existingFee.total_amount,
+      total_amount: computedTotal,
+      paid_amount: paidAmount,
       due_date: new Date(due_date),
-      status: status || existingFee.status,
-      payment_date: payment_date ? new Date(payment_date) : null,
+      payment_date: status === 'Paid' ? (payment_date ? new Date(payment_date) : new Date()) : (payment_date ? new Date(payment_date) : existingFee.payment_date),
       payment_method: payment_method || existingFee.payment_method,
       transaction_id: transaction_id || '',
       notes: notes || '',
@@ -691,20 +686,19 @@ router.put('/fees/:id', async (req, res) => {
       updated_at: Date.now(),
     };
     
-    const fee = await Fee.findByIdAndUpdate(
-      id,
-      feeData,
-      { new: true, runValidators: true }
-    ).populate('student_id', 'name parent_name class_id');
+    const fee = await Fee.findById(id);
+    Object.assign(fee, feeData);
+    await fee.save();
+
+    const populated = await Fee.findById(id).populate('student_id', 'name parent_name class_id');
     
-    res.json(fee);
+    res.json(toLive(populated));
   } catch (error) {
     console.error('Error updating fee record:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// Delete fee record
 router.delete('/fees/:id', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id);
@@ -713,7 +707,6 @@ router.delete('/fees/:id', async (req, res) => {
       return res.status(404).json({ message: 'Fee record not found' });
     }
     
-    // Delete receipt from Cloudinary
     if (fee.receipt_url) {
       await deleteFromCloudinary(fee.receipt_url);
     }
@@ -728,7 +721,6 @@ router.delete('/fees/:id', async (req, res) => {
 
 // ==================== EXPENSE MANAGEMENT ====================
 
-// Get all expenses with filters
 router.get('/expenses', async (req, res) => {
   try {
     const { category, startDate, endDate, page = 1, limit = 50 } = req.query;
@@ -767,7 +759,6 @@ router.get('/expenses', async (req, res) => {
   }
 });
 
-// Get expense by ID
 router.get('/expenses/:id', async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
@@ -783,7 +774,6 @@ router.get('/expenses/:id', async (req, res) => {
   }
 });
 
-// Create expense
 router.post('/expenses', async (req, res) => {
   try {
     const {
@@ -798,7 +788,6 @@ router.post('/expenses', async (req, res) => {
       notes,
     } = req.body;
     
-    // Upload receipt if provided
     let uploadedReceipt = null;
     if (receipt_url) {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/expenses');
@@ -826,7 +815,6 @@ router.post('/expenses', async (req, res) => {
   }
 });
 
-// Update expense
 router.put('/expenses/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -848,7 +836,6 @@ router.put('/expenses/:id', async (req, res) => {
       notes,
     } = req.body;
     
-    // Handle receipt update
     let uploadedReceipt = existingExpense.receipt_url;
     if (receipt_url && receipt_url !== existingExpense.receipt_url) {
       if (existingExpense.receipt_url) {
@@ -883,7 +870,6 @@ router.put('/expenses/:id', async (req, res) => {
   }
 });
 
-// Delete expense
 router.delete('/expenses/:id', async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
@@ -892,7 +878,6 @@ router.delete('/expenses/:id', async (req, res) => {
       return res.status(404).json({ message: 'Expense not found' });
     }
     
-    // Delete receipt from Cloudinary
     if (expense.receipt_url) {
       await deleteFromCloudinary(expense.receipt_url);
     }
@@ -907,7 +892,6 @@ router.delete('/expenses/:id', async (req, res) => {
 
 // ==================== SALARY MANAGEMENT ====================
 
-// Get all salaries with filters
 router.get('/salaries', async (req, res) => {
   try {
     const { status, staffId, month, page = 1, limit = 50 } = req.query;
@@ -951,7 +935,6 @@ router.get('/salaries', async (req, res) => {
   }
 });
 
-// Get salary by ID
 router.get('/salaries/:id', async (req, res) => {
   try {
     const salary = await Salary.findById(req.params.id)
@@ -968,7 +951,6 @@ router.get('/salaries/:id', async (req, res) => {
   }
 });
 
-// Get salaries by staff
 router.get('/salaries/staff/:staffId', async (req, res) => {
   try {
     const { staffId } = req.params;
@@ -982,7 +964,6 @@ router.get('/salaries/staff/:staffId', async (req, res) => {
   }
 });
 
-// Create salary record
 router.post('/salaries', async (req, res) => {
   try {
     const {
@@ -1005,7 +986,6 @@ router.post('/salaries', async (req, res) => {
       return res.status(404).json({ message: 'Staff member not found' });
     }
     
-    // Check if salary already exists for this staff in this month
     const startOfMonth = new Date(month);
     const endOfMonth = new Date(month);
     endOfMonth.setMonth(endOfMonth.getMonth() + 1);
@@ -1019,7 +999,6 @@ router.post('/salaries', async (req, res) => {
       return res.status(400).json({ message: 'Salary already processed for this staff in the selected month' });
     }
     
-    // Upload salary slip if provided
     let uploadedSlip = null;
     if (salary_slip_url) {
       uploadedSlip = await uploadToCloudinary(salary_slip_url, 'finance/salary_slips');
@@ -1053,7 +1032,6 @@ router.post('/salaries', async (req, res) => {
   }
 });
 
-// Update salary record
 router.put('/salaries/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1076,7 +1054,6 @@ router.put('/salaries/:id', async (req, res) => {
       salary_slip_url,
     } = req.body;
     
-    // Handle salary slip update
     let uploadedSlip = existingSalary.salary_slip_url;
     if (salary_slip_url && salary_slip_url !== existingSalary.salary_slip_url) {
       if (existingSalary.salary_slip_url) {
@@ -1112,7 +1089,6 @@ router.put('/salaries/:id', async (req, res) => {
   }
 });
 
-// Delete salary record
 router.delete('/salaries/:id', async (req, res) => {
   try {
     const salary = await Salary.findById(req.params.id);
@@ -1121,7 +1097,6 @@ router.delete('/salaries/:id', async (req, res) => {
       return res.status(404).json({ message: 'Salary record not found' });
     }
     
-    // Delete salary slip from Cloudinary
     if (salary.salary_slip_url) {
       await deleteFromCloudinary(salary.salary_slip_url);
     }
@@ -1135,15 +1110,17 @@ router.delete('/salaries/:id', async (req, res) => {
 });
 
 // ==================== FINANCIAL DASHBOARD STATISTICS ====================
+// (unchanged — note: these aggregates read the persisted `status` field,
+// which is refreshed on every fee write/read via computeLiveStatus, but not
+// re-saved automatically by a background job. For a fully live dashboard,
+// consider periodically re-saving fees or aggregating via computeLiveStatus.)
 
-// Get financial overview
 router.get('/dashboard/overview', async (req, res) => {
   try {
     const currentDate = new Date();
     const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
     const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
     
-    // Fee statistics
     const totalFeesCollected = await Fee.aggregate([
       { $match: { status: 'Paid' } },
       { $group: { _id: null, total: { $sum: '$total_amount' } } }
@@ -1155,13 +1132,12 @@ router.get('/dashboard/overview', async (req, res) => {
     ]);
     
     const pendingFees = await Fee.aggregate([
-      { $match: { status: { $in: ['Pending', 'Overdue'] } } },
+      { $match: { status: { $in: ['Pending', 'Upcoming', 'Due', 'Overdue'] } } },
       { $group: { _id: null, total: { $sum: '$total_amount' } } }
     ]);
     
     const overdueFees = await Fee.countDocuments({ status: 'Overdue' });
     
-    // Expense statistics
     const totalExpenses = await Expense.aggregate([
       { $group: { _id: null, total: { $sum: '$amount' } } }
     ]);
@@ -1175,7 +1151,6 @@ router.get('/dashboard/overview', async (req, res) => {
       { $group: { _id: '$category', total: { $sum: '$amount' } } }
     ]);
     
-    // Salary statistics
     const totalSalaryPaid = await Salary.aggregate([
       { $match: { status: 'Completed' } },
       { $group: { _id: null, total: { $sum: '$net_salary' } } }
@@ -1191,7 +1166,6 @@ router.get('/dashboard/overview', async (req, res) => {
       { $group: { _id: null, total: { $sum: '$net_salary' } } }
     ]);
     
-    // Net balance
     const totalIncome = totalFeesCollected[0]?.total || 0;
     const totalOutcome = (totalExpenses[0]?.total || 0) + (totalSalaryPaid[0]?.total || 0);
     const netBalance = totalIncome - totalOutcome;
@@ -1221,7 +1195,6 @@ router.get('/dashboard/overview', async (req, res) => {
   }
 });
 
-// Get monthly financial report
 router.get('/reports/monthly', async (req, res) => {
   try {
     const { year } = req.query;
@@ -1266,7 +1239,6 @@ router.get('/reports/monthly', async (req, res) => {
 
 // ==================== DOCUMENT UPLOAD ====================
 
-// Upload receipt/invoice
 router.post('/upload', async (req, res) => {
   try {
     const { document, type } = req.body;
