@@ -57,6 +57,27 @@ const toObjectId = (id) => {
   }
 };
 
+// The teacher of a student is ALWAYS the active Teacher who holds that class + section in Staff
+const resolveTeacherForClassSection = async (classId, section, requestedTeacherId) => {
+  if (!classId || !section) {
+    return { error: 'Class and Section are required' };
+  }
+  const teacher = await Staff.findOne({
+    role: 'Teacher',
+    status: 'Active',
+    assignments: { $elemMatch: { class_id: classId, section } },
+  });
+  if (!teacher) {
+    return {
+      error: `No active teacher is assigned to ${String(classId).toUpperCase()} - Section ${section}. Assign a teacher in Staff Management first.`,
+    };
+  }
+  if (requestedTeacherId && String(requestedTeacherId) !== String(teacher._id)) {
+    return { error: 'Selected teacher does not match the teacher assigned to this class and section' };
+  }
+  return { teacher };
+};
+
 const syncStudentToMobile = async (studentData, isDelete = false) => {
   if (!process.env.MOBILE_BACKEND_URL) {
     console.log('MOBILE_BACKEND_URL not configured, skipping sync');
@@ -594,11 +615,11 @@ router.post('/', async (req, res) => {
       }
     }
     
-    if (assigned_teacher_id) {
-      const teacherExists = await Staff.findById(assigned_teacher_id);
-      if (!teacherExists) {
-        return res.status(400).json({ message: 'Selected teacher does not exist' });
-      }
+    // Resolve teacher from Staff automatically (multi-assignment aware)
+    const { teacher: resolvedTeacher, error: teacherError } =
+      await resolveTeacherForClassSection(class_id, section, assigned_teacher_id);
+    if (teacherError) {
+      return res.status(400).json({ message: teacherError });
     }
     
     const uploadedDocuments = {};
@@ -675,9 +696,9 @@ router.post('/', async (req, res) => {
       gender,
       blood_group: blood_group || '',
       class_id: class_id || null,
-      section: section || 'A',
+      section,
       class_type: classType,
-      assigned_teacher_id: assigned_teacher_id || null,
+      assigned_teacher_id: resolvedTeacher._id,
       parent_name,
       parent_relationship: parent_relationship || 'Mother',
       parent_email,
@@ -883,11 +904,15 @@ router.put('/:id', async (req, res) => {
       recurring_fees,
     } = req.body;
     
-    if (assigned_teacher_id) {
-      const teacherExists = await Staff.findById(assigned_teacher_id);
-      if (!teacherExists) {
-        return res.status(400).json({ message: 'Selected teacher does not exist' });
+    // Resolve teacher automatically (unless student is Graduated)
+    let resolvedTeacherId = null;
+    if (status !== 'Graduated') {
+      const { teacher, error: teacherError } =
+        await resolveTeacherForClassSection(class_id, section, assigned_teacher_id);
+      if (teacherError) {
+        return res.status(400).json({ message: teacherError });
       }
+      resolvedTeacherId = teacher._id;
     }
     
     if (emergency_contact) {
@@ -1010,9 +1035,9 @@ router.put('/:id', async (req, res) => {
       gender,
       blood_group: blood_group || '',
       class_id: class_id || null,
-      section: section || 'A',
+      section,
       class_type: classType,
-      assigned_teacher_id: assigned_teacher_id || null,
+      assigned_teacher_id: resolvedTeacherId,
       parent_name,
       parent_relationship: parent_relationship || 'Mother',
       parent_email,
@@ -1391,7 +1416,16 @@ router.post('/promote-all', async (req, res) => {
 
     const students = await Student.find({ status: 'Active' });
 
-    const results = { promoted: 0, graduated: 0, skipped: 0, details: [] };
+    // Load teachers once: key = "class|section" (one teacher can appear under many keys)
+    const teachers = await Staff.find({ role: 'Teacher', status: 'Active' });
+    const teacherMap = new Map();
+    for (const t of teachers) {
+      for (const a of t.assignments || []) {
+        teacherMap.set(`${a.class_id}|${a.section}`, t._id);
+      }
+    }
+
+    const results = { promoted: 0, graduated: 0, skipped: 0, noTeacher: 0, details: [] };
 
     for (const student of students) {
       const currentClass = student.class_id;
@@ -1406,6 +1440,7 @@ router.post('/promote-all', async (req, res) => {
 
       if (nextClass === null) {
         student.status = 'Graduated';
+        student.assigned_teacher_id = null;
         student.promotion_history.push({
           from_class: currentClass,
           to_class: 'Graduated',
@@ -1422,6 +1457,12 @@ router.post('/promote-all', async (req, res) => {
           promoted_at: new Date(),
         });
         student.class_id = nextClass;
+
+        // Re-assign the teacher of the NEW class + same section (null if none exists yet)
+        const newTeacherId = teacherMap.get(`${nextClass}|${student.section}`) || null;
+        student.assigned_teacher_id = newTeacherId;
+        if (!newTeacherId) results.noTeacher++;
+
         results.promoted++;
         results.details.push({ id: student._id, name: student.name, from: currentClass, to: nextClass });
       }
@@ -1431,7 +1472,7 @@ router.post('/promote-all', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Promotion complete: ${results.promoted} promoted, ${results.graduated} graduated, ${results.skipped} skipped`,
+      message: `Promotion complete: ${results.promoted} promoted, ${results.graduated} graduated, ${results.skipped} skipped, ${results.noTeacher} without a teacher in the new class/section`,
       results,
     });
   } catch (error) {

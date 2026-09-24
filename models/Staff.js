@@ -1,5 +1,13 @@
 const mongoose = require('mongoose');
 
+const assignmentSchema = new mongoose.Schema(
+  {
+    class_id: { type: String, required: true },   // 'playgroup' | 'nursery' | 'lkg' | 'ukg'
+    section: { type: String, required: true },    // 'A' | 'B' | 'C' | 'D'
+  },
+  { _id: false }
+);
+
 const staffSchema = new mongoose.Schema({
   // Personal Information
   name: {
@@ -52,9 +60,10 @@ const staffSchema = new mongoose.Schema({
     required: true,
     enum: ['Academics', 'Administration', 'Transport', 'Security', 'Housekeeping', 'Kitchen'],
   },
-  assigned_class_id: {
-    type: String,
-    default: null,
+  // Classes + sections this teacher is in charge of (only for role === 'Teacher')
+  assignments: {
+    type: [assignmentSchema],
+    default: [],
   },
   date_of_joining: {
     type: Date,
@@ -198,5 +207,6 @@ staffSchema.index({
   phone: 'text', 
   designation: 'text' 
 });
+staffSchema.index({ 'assignments.class_id': 1, 'assignments.section': 1 });
 
 module.exports = mongoose.model('Staff', staffSchema);

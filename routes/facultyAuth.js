@@ -1,8 +1,32 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Faculty = require('../models/Faculty');
+const Staff = require('../models/Staff');
 const bcrypt = require('bcryptjs');
 const syncToMobileBackend = require('../utils/syncToMobile');
+const { facultyFieldsFromStaff, mapFacultyStatus } = require('../utils/staffFacultySync');
+
+// ==================== GET ELIGIBLE STAFF (Teachers without a faculty account) ====================
+router.get('/eligible-staff', async (req, res) => {
+  try {
+    const linkedIds = (await Faculty.distinct('staff_id')).filter(Boolean);
+
+    const staff = await Staff.find({
+      role: 'Teacher',
+      status: 'Active',
+      'assignments.0': { $exists: true },       // has at least one class+section
+      _id: { $nin: linkedIds },
+    })
+      .select('name email phone qualification address assignments specialization experience_years designation')
+      .sort({ name: 1 });
+
+    res.json(staff);
+  } catch (error) {
+    console.error('Error fetching eligible staff:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
 
 // Get all faculty
 router.get('/', async (req, res) => {
@@ -22,7 +46,9 @@ router.get('/', async (req, res) => {
       ];
     }
     
-    const faculty = await Faculty.find(query).sort({ created_at: -1 });
+    const faculty = await Faculty.find(query)
+      .populate('staff_id', 'name email phone')
+      .sort({ created_at: -1 });
     res.json(faculty);
   } catch (error) {
     console.error('Error fetching faculty:', error);
@@ -33,7 +59,8 @@ router.get('/', async (req, res) => {
 // Get faculty by ID
 router.get('/:id', async (req, res) => {
   try {
-    const faculty = await Faculty.findById(req.params.id);
+    const faculty = await Faculty.findById(req.params.id)
+      .populate('staff_id', 'name email phone');
     if (!faculty) {
       return res.status(404).json({ message: 'Faculty not found' });
     }
@@ -44,144 +71,131 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Create faculty (UPDATED with auto-sync)
+// Create faculty (STAFF-LINKED + multi-assignment version)
 router.post('/', async (req, res) => {
   try {
-    const {
-      faculty_name,
-      mobile_number,
-      email,
-      qualification,
-      address,
-      assigned_class,
-      assigned_section,
-      subject,
-      employee_id,
-      joining_date,
-      username,
-      password,
-      status,
-      experience_years,
-      specialization,
-      notes,
-    } = req.body;
-    
-    // Check if employee_id or username already exists
-    const existingFaculty = await Faculty.findOne({ 
-      $or: [{ email }, { username }, { employee_id }, { mobile_number }] 
+    const { staff_id, employee_id, username, password, subject, status, notes } = req.body;
+
+    // 1) A faculty account MUST come from an existing staff member
+    if (!staff_id || !mongoose.isValidObjectId(staff_id)) {
+      return res.status(400).json({ message: 'Please select a staff member. Create the staff member in Staff Management first.' });
+    }
+    const staff = await Staff.findById(staff_id);
+    if (!staff) {
+      return res.status(404).json({ message: 'Staff member not found. Create the staff member first.' });
+    }
+    if (staff.role !== 'Teacher') {
+      return res.status(400).json({ message: 'Faculty accounts can only be created for staff with role Teacher' });
+    }
+    if (!staff.assignments || staff.assignments.length === 0) {
+      return res.status(400).json({ message: 'Assign at least one class and section to this teacher in Staff Management first' });
+    }
+    if (await Faculty.findOne({ staff_id: staff._id })) {
+      return res.status(400).json({ message: 'This staff member already has a faculty account' });
+    }
+
+    if (!employee_id || !username || !password) {
+      return res.status(400).json({ message: 'Employee ID, username and password are required' });
+    }
+
+    const duplicate = await Faculty.findOne({
+      $or: [
+        { email: staff.email },
+        { mobile_number: staff.phone },
+        { username },
+        { employee_id },
+      ],
     });
-    if (existingFaculty) {
+    if (duplicate) {
       return res.status(400).json({ message: 'Faculty with this email, username, employee ID, or mobile number already exists' });
     }
-    
+
+    // 2) Identity/class data comes from Staff, NOT from the request body
     const faculty = new Faculty({
-      faculty_name,
-      mobile_number,
-      email,
-      qualification,
-      address,
-      assigned_class,
-      assigned_section: assigned_section || 'A',
-      subject: subject || '',
+      staff_id: staff._id,
+      ...facultyFieldsFromStaff(staff),
+      subject: (subject || staff.specialization || '').trim(),
       employee_id,
-      joining_date: new Date(joining_date),
       username,
       password,
-      status: status || 'Active',
-      experience_years: experience_years || 0,
-      specialization: specialization || '',
+      status: staff.status === 'Active' ? (status || 'Active') : mapFacultyStatus(staff.status),
       notes: notes || '',
       sync_status: 'pending',
     });
-    
+
     const savedFaculty = await faculty.save();
-    
-    // Auto-sync to mobile backend
+
     let syncResult = null;
     if (process.env.MOBILE_BACKEND_URL) {
       syncResult = await syncToMobileBackend(savedFaculty);
       if (syncResult.success) {
         savedFaculty.sync_status = 'synced';
         savedFaculty.synced_at = new Date();
-        await savedFaculty.save();
       } else {
         savedFaculty.sync_status = 'failed';
         savedFaculty.sync_error = syncResult.error;
         savedFaculty.sync_attempts = 1;
-        await savedFaculty.save();
       }
+      await savedFaculty.save();
     }
-    
-    // Remove password from response
+
     const facultyResponse = savedFaculty.toObject();
     delete facultyResponse.password;
-    
-    res.status(201).json({
-      ...facultyResponse,
-      sync: syncResult || { message: 'Sync not configured' }
-    });
+
+    res.status(201).json({ ...facultyResponse, sync: syncResult || { message: 'Sync not configured' } });
   } catch (error) {
     console.error('Error creating faculty:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// Update faculty
+// Update faculty (account-level fields only; identity/class from Staff)
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const existingFaculty = await Faculty.findById(id);
-    
     if (!existingFaculty) {
       return res.status(404).json({ message: 'Faculty not found' });
     }
-    
-    const {
-      faculty_name,
-      mobile_number,
-      email,
-      qualification,
-      address,
-      assigned_class,
-      assigned_section,
-      subject,
-      employee_id,
-      joining_date,
-      username,
-      password,
-      status,
-      experience_years,
-      specialization,
-      notes,
-    } = req.body;
-    
+
+    // Faculty must still be linked to a real staff member
+    const staff = existingFaculty.staff_id ? await Staff.findById(existingFaculty.staff_id) : null;
+    if (!staff) {
+      return res.status(400).json({
+        message: 'This faculty account is not linked to a staff member. Link it (migration) or recreate it from Staff.',
+      });
+    }
+
+    // Only account-level fields are editable here
+    const { employee_id, username, password, subject, status, notes } = req.body;
+
+    const duplicate = await Faculty.findOne({
+      _id: { $ne: id },
+      $or: [{ username }, { employee_id }],
+    });
+    if (duplicate) {
+      return res.status(400).json({ message: 'Another faculty already uses this username or employee ID' });
+    }
+
     const updateData = {
-      faculty_name,
-      mobile_number,
-      email,
-      qualification,
-      address,
-      assigned_class,
-      assigned_section: assigned_section || 'A',
-      subject: subject || '',
+      ...facultyFieldsFromStaff(staff),           // name/assignments/etc. always from Staff
+      subject: (subject ?? existingFaculty.subject ?? '').trim(),
       employee_id,
-      joining_date: new Date(joining_date),
       username,
-      status,
-      experience_years: experience_years || 0,
-      specialization: specialization || '',
+      status: staff.status === 'Active' ? (status || existingFaculty.status) : mapFacultyStatus(staff.status),
       notes: notes || '',
       updated_at: Date.now(),
       sync_status: 'pending',
     };
-    
+
     if (password && password !== existingFaculty.password) {
       const salt = await bcrypt.genSalt(10);
       updateData.password = await bcrypt.hash(password, salt);
     }
-    
-    const faculty = await Faculty.findByIdAndUpdate(id, updateData, { new: true });
-    
+
+    const faculty = await Faculty.findByIdAndUpdate(id, updateData, { new: true })
+      .populate('staff_id', 'name email phone');
+
     let syncResult = null;
     if (process.env.MOBILE_BACKEND_URL) {
       syncResult = await syncToMobileBackend(faculty);
@@ -189,22 +203,18 @@ router.put('/:id', async (req, res) => {
         faculty.sync_status = 'synced';
         faculty.synced_at = new Date();
         faculty.sync_error = null;
-        await faculty.save();
       } else {
         faculty.sync_status = 'failed';
         faculty.sync_error = syncResult.error;
         faculty.sync_attempts += 1;
-        await faculty.save();
       }
+      await faculty.save();
     }
-    
+
     const facultyResponse = faculty.toObject();
     delete facultyResponse.password;
-    
-    res.json({
-      ...facultyResponse,
-      sync: syncResult || { message: 'Sync not configured' }
-    });
+
+    res.json({ ...facultyResponse, sync: syncResult || { message: 'Sync not configured' } });
   } catch (error) {
     console.error('Error updating faculty:', error);
     res.status(400).json({ message: error.message });
@@ -214,7 +224,8 @@ router.put('/:id', async (req, res) => {
 // Force re-sync
 router.post('/:id/force-resync', async (req, res) => {
   try {
-    const faculty = await Faculty.findById(req.params.id);
+    const faculty = await Faculty.findById(req.params.id)
+      .populate('staff_id', 'name email phone');
     if (!faculty) {
       return res.status(404).json({ message: 'Faculty not found' });
     }
@@ -299,7 +310,7 @@ router.patch('/:id/status', async (req, res) => {
         sync_status: 'pending' 
       },
       { new: true }
-    );
+    ).populate('staff_id', 'name email phone');
     
     if (!faculty) {
       return res.status(404).json({ message: 'Faculty not found' });
@@ -362,7 +373,8 @@ router.get('/stats/overview', async (req, res) => {
 // Retry failed sync
 router.post('/:id/retry-sync', async (req, res) => {
   try {
-    const faculty = await Faculty.findById(req.params.id);
+    const faculty = await Faculty.findById(req.params.id)
+      .populate('staff_id', 'name email phone');
     if (!faculty) {
       return res.status(404).json({ message: 'Faculty not found' });
     }

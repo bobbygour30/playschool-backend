@@ -3,6 +3,16 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const facultySchema = new mongoose.Schema({
+  // Every faculty account MUST belong to a staff member
+  staff_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Staff',
+    required: true,
+    unique: true,
+    sparse: true,
+    index: true,
+  },
+
   // Personal Information
   faculty_name: {
     type: String,
@@ -31,6 +41,7 @@ const facultySchema = new mongoose.Schema({
   },
   
   // Professional Information
+  // Legacy/mobile: primary assignment (first in assignments[])
   assigned_class: {
     type: String,
     required: true,
@@ -38,6 +49,16 @@ const facultySchema = new mongoose.Schema({
   assigned_section: {
     type: String,
     default: 'A',
+  },
+  // Full list mirrored from Staff
+  assignments: {
+    type: [
+      new mongoose.Schema(
+        { class_id: String, section: String },
+        { _id: false }
+      ),
+    ],
+    default: [],
   },
   subject: {
     type: String,
@@ -53,7 +74,7 @@ const facultySchema = new mongoose.Schema({
     required: true,
   },
   
-  // NEW: Class mappings for multiple class assignments
+  // Class mappings for multiple class assignments
   class_mappings: [{
     class_name: {
       type: String,
@@ -107,7 +128,7 @@ const facultySchema = new mongoose.Schema({
     default: '',
   },
   
-  // NEW: Leave balance tracking
+  // Leave balance tracking
   leave_balances: {
     sick: {
       total: { type: Number, default: 12 },
@@ -136,7 +157,7 @@ const facultySchema = new mongoose.Schema({
     },
   },
   
-  // NEW: Substitute teaching assignments (as substitute teacher)
+  // Substitute teaching assignments (as substitute teacher)
   substitute_assignments: [{
     leave_request_id: {
       type: mongoose.Schema.Types.ObjectId,
@@ -158,7 +179,7 @@ const facultySchema = new mongoose.Schema({
     },
   }],
   
-  // NEW: Holiday/Leave preferences
+  // Holiday/Leave preferences
   preferences: {
     notifications: {
       email: { type: Boolean, default: true },
@@ -226,7 +247,7 @@ facultySchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// NEW: Method to calculate leave balance for a specific type
+// Method to calculate leave balance for a specific type
 facultySchema.methods.calculateLeaveBalance = function(leaveType) {
   const balance = this.leave_balances[leaveType];
   if (!balance) return { total: 0, used: 0, remaining: 0 };
@@ -240,7 +261,7 @@ facultySchema.methods.calculateLeaveBalance = function(leaveType) {
   };
 };
 
-// NEW: Method to deduct leave days
+// Method to deduct leave days
 facultySchema.methods.deductLeave = async function(leaveType, days) {
   const balance = this.leave_balances[leaveType];
   if (!balance) return { success: false, message: 'Invalid leave type' };
@@ -256,7 +277,7 @@ facultySchema.methods.deductLeave = async function(leaveType, days) {
   return { success: true, remaining: balance.remaining };
 };
 
-// NEW: Method to add leave days (for carryover or adjustments)
+// Method to add leave days (for carryover or adjustments)
 facultySchema.methods.addLeave = async function(leaveType, days, isCarryover = false) {
   const balance = this.leave_balances[leaveType];
   if (!balance) return { success: false, message: 'Invalid leave type' };
@@ -272,7 +293,7 @@ facultySchema.methods.addLeave = async function(leaveType, days, isCarryover = f
   return { success: true, remaining: balance.remaining };
 };
 
-// NEW: Method to check if faculty is on leave on a specific date
+// Method to check if faculty is on leave on a specific date
 facultySchema.methods.isOnLeaveOnDate = async function(date) {
   const targetDate = new Date(date);
   targetDate.setHours(0, 0, 0, 0);
@@ -289,7 +310,7 @@ facultySchema.methods.isOnLeaveOnDate = async function(date) {
   return !!leave;
 };
 
-// NEW: Method to get faculty's active leaves
+// Method to get faculty's active leaves
 facultySchema.methods.getActiveLeaves = async function() {
   const LeaveRequest = mongoose.model('LeaveRequest');
   const today = new Date();
@@ -304,7 +325,7 @@ facultySchema.methods.getActiveLeaves = async function() {
   });
 };
 
-// NEW: Method to get faculty's substitute assignments
+// Method to get faculty's substitute assignments
 facultySchema.methods.getSubstituteAssignments = async function(status) {
   const query = { substitute_teacher_id: this._id };
   if (status) query.status = status;
@@ -315,7 +336,7 @@ facultySchema.methods.getSubstituteAssignments = async function(status) {
     .sort({ from_date: 1 });
 };
 
-// NEW: Static method to get all faculty available on a date
+// Static method to get all faculty available on a date
 facultySchema.statics.getAvailableOnDate = async function(date, excludedIds = []) {
   const targetDate = new Date(date);
   targetDate.setHours(0, 0, 0, 0);

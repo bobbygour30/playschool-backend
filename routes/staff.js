@@ -1,7 +1,62 @@
 const express = require('express');
 const router = express.Router();
 const Staff = require('../models/Staff');
+const Faculty = require('../models/Faculty');
+const Student = require('../models/Student');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
+const {
+  validateTeacherAssignment,
+  normalizeAssignments,
+  syncStudentsForTeacher,
+  syncFacultyFromStaff,
+} = require('../utils/staffFacultySync');
+
+// document field -> cloudinary folder
+const DOC_FOLDERS = {
+  photo: 'staff/photos',
+  resume: 'staff/resumes',
+  qualification_doc: 'staff/qualifications',
+  experience_doc: 'staff/experience',
+  aadhar_doc: 'staff/aadhar',
+  pan_doc: 'staff/pan',
+  police_verification_doc: 'staff/police_verification',
+  offer_letter: 'staff/offer_letters',
+};
+
+// Fields shared by create + update
+const buildStaffFields = (b) => {
+  const isTeacher = b.role === 'Teacher';
+  return {
+    name: b.name,
+    email: b.email,
+    phone: b.phone,
+    address: b.address,
+    date_of_birth: new Date(b.date_of_birth),
+    gender: b.gender,
+    blood_group: b.blood_group || '',
+    role: b.role,
+    designation: b.designation,
+    department: b.department,
+    assignments: isTeacher ? normalizeAssignments(b.assignments) : [],
+    date_of_joining: new Date(b.date_of_joining),
+    qualification: b.qualification,
+    experience_years: b.experience_years || 0,
+    specialization: b.specialization || '',
+    salary: parseFloat(b.salary),
+    account_number: b.account_number || '',
+    ifsc_code: b.ifsc_code || '',
+    bank_name: b.bank_name || '',
+    pan_number: b.pan_number || '',
+    uan_number: b.uan_number || '',
+    emergency_contact: {
+      name: b.emergency_contact?.name || '',
+      phone: b.emergency_contact?.phone || '',
+      relation: b.emergency_contact?.relation || '',
+    },
+    police_verification: b.police_verification || '',
+    notes: b.notes || '',
+  };
+};
 
 // ==================== GET ALL STAFF ====================
 router.get('/', async (req, res) => {
@@ -59,11 +114,8 @@ router.get('/:id', async (req, res) => {
 // ==================== GET TEACHERS (for dropdown) ====================
 router.get('/teachers/list', async (req, res) => {
   try {
-    const teachers = await Staff.find({ 
-      role: 'Teacher', 
-      status: 'Active' 
-    }).select('name designation email phone');
-    
+    const teachers = await Staff.find({ role: 'Teacher', status: 'Active' })
+      .select('name designation email phone assignments');
     res.json(teachers);
   } catch (error) {
     console.error('Error fetching teachers:', error);
@@ -89,112 +141,38 @@ router.get('/support-staff/list', async (req, res) => {
 // ==================== CREATE STAFF ====================
 router.post('/', async (req, res) => {
   try {
-    const {
-      name,
-      email,
-      phone,
-      address,
-      date_of_birth,
-      gender,
-      blood_group,
-      role,
-      designation,
-      department,
-      assigned_class_id,
-      date_of_joining,
-      qualification,
-      experience_years,
-      specialization,
-      salary,
-      account_number,
-      ifsc_code,
-      bank_name,
-      pan_number,
-      uan_number,
-      emergency_contact,
-      police_verification,
-      status,
-      documents,
-      notes,
-      created_by,
-    } = req.body;
-    
-    // Check if email already exists
+    const { email, role, assignments, status, documents, created_by } = req.body;
+
     const existingStaff = await Staff.findOne({ email });
     if (existingStaff) {
       return res.status(400).json({ message: 'Staff member with this email already exists' });
     }
-    
-    // Upload documents to Cloudinary if provided
+
+    // Teacher needs >= 1 valid class+section, each held by no other teacher
+    const assignmentError = await validateTeacherAssignment({ role, assignments });
+    if (assignmentError) {
+      return res.status(400).json({ message: assignmentError });
+    }
+
     const uploadedDocuments = {};
-    
-    if (documents) {
-      if (documents.photo) {
-        uploadedDocuments.photo = await uploadToCloudinary(documents.photo, 'staff/photos');
-      }
-      if (documents.resume) {
-        uploadedDocuments.resume = await uploadToCloudinary(documents.resume, 'staff/resumes');
-      }
-      if (documents.qualification_doc) {
-        uploadedDocuments.qualification_doc = await uploadToCloudinary(documents.qualification_doc, 'staff/qualifications');
-      }
-      if (documents.experience_doc) {
-        uploadedDocuments.experience_doc = await uploadToCloudinary(documents.experience_doc, 'staff/experience');
-      }
-      if (documents.aadhar_doc) {
-        uploadedDocuments.aadhar_doc = await uploadToCloudinary(documents.aadhar_doc, 'staff/aadhar');
-      }
-      if (documents.pan_doc) {
-        uploadedDocuments.pan_doc = await uploadToCloudinary(documents.pan_doc, 'staff/pan');
-      }
-      if (documents.police_verification_doc) {
-        uploadedDocuments.police_verification_doc = await uploadToCloudinary(documents.police_verification_doc, 'staff/police_verification');
-      }
-      if (documents.offer_letter) {
-        uploadedDocuments.offer_letter = await uploadToCloudinary(documents.offer_letter, 'staff/offer_letters');
+    for (const [field, folder] of Object.entries(DOC_FOLDERS)) {
+      if (documents?.[field]) {
+        uploadedDocuments[field] = await uploadToCloudinary(documents[field], folder);
       }
     }
-    
-    const staffData = {
-      name,
-      email,
-      phone,
-      address,
-      date_of_birth: new Date(date_of_birth),
-      gender,
-      blood_group: blood_group || '',
-      role,
-      designation,
-      department,
-      assigned_class_id: role === 'Teacher' ? (assigned_class_id || null) : null,
-      date_of_joining: new Date(date_of_joining),
-      qualification,
-      experience_years: experience_years || 0,
-      specialization: specialization || '',
-      salary: parseFloat(salary),
-      account_number: account_number || '',
-      ifsc_code: ifsc_code || '',
-      bank_name: bank_name || '',
-      pan_number: pan_number || '',
-      uan_number: uan_number || '',
-      emergency_contact: {
-        name: emergency_contact?.name || '',
-        phone: emergency_contact?.phone || '',
-        relation: emergency_contact?.relation || '',
-      },
-      police_verification: police_verification || '',
+
+    const staff = new Staff({
+      ...buildStaffFields(req.body),
       status: status || 'Active',
       documents: uploadedDocuments,
-      notes: notes || '',
       created_by: created_by || null,
-    };
-    
-    const staff = new Staff(staffData);
+    });
     const savedStaff = await staff.save();
-    
-    const populatedStaff = await Staff.findById(savedStaff._id)
-      .populate('created_by', 'name email');
-    
+
+    // Link existing students of every assigned class + section to this teacher
+    await syncStudentsForTeacher(savedStaff);
+
+    const populatedStaff = await Staff.findById(savedStaff._id).populate('created_by', 'name email');
     res.status(201).json(populatedStaff);
   } catch (error) {
     console.error('Error creating staff:', error);
@@ -207,157 +185,61 @@ router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const existingStaff = await Staff.findById(id);
-    
     if (!existingStaff) {
       return res.status(404).json({ message: 'Staff member not found' });
     }
-    
-    const {
-      name,
-      email,
-      phone,
-      address,
-      date_of_birth,
-      gender,
-      blood_group,
-      role,
-      designation,
-      department,
-      assigned_class_id,
-      date_of_joining,
-      qualification,
-      experience_years,
-      specialization,
-      salary,
-      account_number,
-      ifsc_code,
-      bank_name,
-      pan_number,
-      uan_number,
-      emergency_contact,
-      police_verification,
-      status,
-      documents,
-      notes,
-    } = req.body;
-    
-    // Check if email is being changed and already exists
+
+    const { email, role, assignments, status, documents } = req.body;
+
     if (email !== existingStaff.email) {
       const existingEmail = await Staff.findOne({ email, _id: { $ne: id } });
       if (existingEmail) {
         return res.status(400).json({ message: 'Staff member with this email already exists' });
       }
     }
-    
-    // Handle document updates - delete old files from Cloudinary if replaced
-    const updatedDocuments = { ...existingStaff.documents };
-    
-    if (documents) {
-      // Photo
-      if (documents.photo && documents.photo !== existingStaff.documents?.photo) {
-        if (existingStaff.documents?.photo) {
-          await deleteFromCloudinary(existingStaff.documents.photo);
-        }
-        updatedDocuments.photo = await uploadToCloudinary(documents.photo, 'staff/photos');
-      }
-      
-      // Resume
-      if (documents.resume && documents.resume !== existingStaff.documents?.resume) {
-        if (existingStaff.documents?.resume) {
-          await deleteFromCloudinary(existingStaff.documents.resume);
-        }
-        updatedDocuments.resume = await uploadToCloudinary(documents.resume, 'staff/resumes');
-      }
-      
-      // Qualification Document
-      if (documents.qualification_doc && documents.qualification_doc !== existingStaff.documents?.qualification_doc) {
-        if (existingStaff.documents?.qualification_doc) {
-          await deleteFromCloudinary(existingStaff.documents.qualification_doc);
-        }
-        updatedDocuments.qualification_doc = await uploadToCloudinary(documents.qualification_doc, 'staff/qualifications');
-      }
-      
-      // Experience Document
-      if (documents.experience_doc && documents.experience_doc !== existingStaff.documents?.experience_doc) {
-        if (existingStaff.documents?.experience_doc) {
-          await deleteFromCloudinary(existingStaff.documents.experience_doc);
-        }
-        updatedDocuments.experience_doc = await uploadToCloudinary(documents.experience_doc, 'staff/experience');
-      }
-      
-      // Aadhar Document
-      if (documents.aadhar_doc && documents.aadhar_doc !== existingStaff.documents?.aadhar_doc) {
-        if (existingStaff.documents?.aadhar_doc) {
-          await deleteFromCloudinary(existingStaff.documents.aadhar_doc);
-        }
-        updatedDocuments.aadhar_doc = await uploadToCloudinary(documents.aadhar_doc, 'staff/aadhar');
-      }
-      
-      // PAN Document
-      if (documents.pan_doc && documents.pan_doc !== existingStaff.documents?.pan_doc) {
-        if (existingStaff.documents?.pan_doc) {
-          await deleteFromCloudinary(existingStaff.documents.pan_doc);
-        }
-        updatedDocuments.pan_doc = await uploadToCloudinary(documents.pan_doc, 'staff/pan');
-      }
-      
-      // Police Verification Document
-      if (documents.police_verification_doc && documents.police_verification_doc !== existingStaff.documents?.police_verification_doc) {
-        if (existingStaff.documents?.police_verification_doc) {
-          await deleteFromCloudinary(existingStaff.documents.police_verification_doc);
-        }
-        updatedDocuments.police_verification_doc = await uploadToCloudinary(documents.police_verification_doc, 'staff/police_verification');
-      }
-      
-      // Offer Letter
-      if (documents.offer_letter && documents.offer_letter !== existingStaff.documents?.offer_letter) {
-        if (existingStaff.documents?.offer_letter) {
-          await deleteFromCloudinary(existingStaff.documents.offer_letter);
-        }
-        updatedDocuments.offer_letter = await uploadToCloudinary(documents.offer_letter, 'staff/offer_letters');
+
+    // Can't stop being a Teacher while a faculty account exists for this person
+    if (role !== 'Teacher' && existingStaff.role === 'Teacher') {
+      const linkedFaculty = await Faculty.findOne({ staff_id: id });
+      if (linkedFaculty) {
+        return res.status(400).json({
+          message: 'This staff member has a faculty account. Delete the faculty account before changing the role.',
+        });
       }
     }
-    
-    const staffData = {
-      name,
-      email,
-      phone,
-      address,
-      date_of_birth: new Date(date_of_birth),
-      gender,
-      blood_group: blood_group || '',
-      role,
-      designation,
-      department,
-      assigned_class_id: role === 'Teacher' ? (assigned_class_id || null) : null,
-      date_of_joining: new Date(date_of_joining),
-      qualification,
-      experience_years: experience_years || 0,
-      specialization: specialization || '',
-      salary: parseFloat(salary),
-      account_number: account_number || '',
-      ifsc_code: ifsc_code || '',
-      bank_name: bank_name || '',
-      pan_number: pan_number || '',
-      uan_number: uan_number || '',
-      emergency_contact: {
-        name: emergency_contact?.name || '',
-        phone: emergency_contact?.phone || '',
-        relation: emergency_contact?.relation || '',
-      },
-      police_verification: police_verification || '',
-      status,
-      documents: updatedDocuments,
-      notes: notes || '',
-      updated_at: Date.now(),
-    };
-    
+
+    const assignmentError = await validateTeacherAssignment({ role, assignments }, id);
+    if (assignmentError) {
+      return res.status(400).json({ message: assignmentError });
+    }
+
+    const updatedDocuments = { ...existingStaff.documents };
+    if (documents) {
+      for (const [field, folder] of Object.entries(DOC_FOLDERS)) {
+        const incoming = documents[field];
+        const current = existingStaff.documents?.[field];
+        if (incoming && incoming !== current) {
+          if (current) await deleteFromCloudinary(current);
+          updatedDocuments[field] = await uploadToCloudinary(incoming, folder);
+        }
+      }
+    }
+
     const staff = await Staff.findByIdAndUpdate(
       id,
-      staffData,
+      {
+        ...buildStaffFields(req.body),
+        status,
+        documents: updatedDocuments,
+        updated_at: Date.now(),
+      },
       { new: true, runValidators: true }
     ).populate('created_by', 'name email');
-    
+
+    // Keep everything downstream connected
+    await syncStudentsForTeacher(staff);   // removed slots release students, new slots pick them up
+    await syncFacultyFromStaff(staff);     // faculty account mirrors name/assignments/status
+
     res.json(staff);
   } catch (error) {
     console.error('Error updating staff:', error);
@@ -369,31 +251,29 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const staff = await Staff.findById(req.params.id);
-    
     if (!staff) {
       return res.status(404).json({ message: 'Staff member not found' });
     }
-    
-    // Delete all associated documents from Cloudinary
+
+    // Block deletion while a faculty account depends on this staff member
+    const linkedFaculty = await Faculty.findOne({ staff_id: staff._id });
+    if (linkedFaculty) {
+      return res.status(400).json({
+        message: 'This staff member has a faculty account. Delete the faculty account first.',
+      });
+    }
+
     if (staff.documents) {
-      const docFields = [
-        'photo',
-        'resume',
-        'qualification_doc',
-        'experience_doc',
-        'aadhar_doc',
-        'pan_doc',
-        'police_verification_doc',
-        'offer_letter'
-      ];
-      
-      for (const field of docFields) {
+      for (const field of Object.keys(DOC_FOLDERS)) {
         if (staff.documents[field]) {
           await deleteFromCloudinary(staff.documents[field]);
         }
       }
     }
-    
+
+    // Students of this teacher become "unassigned"
+    await Student.updateMany({ assigned_teacher_id: staff._id }, { $set: { assigned_teacher_id: null } });
+
     await Staff.findByIdAndDelete(req.params.id);
     res.json({ message: 'Staff member deleted successfully' });
   } catch (error) {
@@ -407,21 +287,24 @@ router.patch('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    
+
     if (!['Active', 'Inactive', 'On Leave', 'Suspended'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
-    
+
     const staff = await Staff.findByIdAndUpdate(
       id,
       { status, updated_at: Date.now() },
       { new: true }
     ).populate('created_by', 'name email');
-    
+
     if (!staff) {
       return res.status(404).json({ message: 'Staff member not found' });
     }
-    
+
+    await syncStudentsForTeacher(staff);
+    await syncFacultyFromStaff(staff);
+
     res.json(staff);
   } catch (error) {
     console.error('Error updating staff status:', error);
