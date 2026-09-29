@@ -29,10 +29,11 @@ const CLOUDINARY_FIELDS = {
 const getPath = (obj, path) =>
   path.split('.').reduce((acc, k) => (acc == null ? acc : acc[k]), obj);
 
-// ==================== ARCHIVE HELPERS (imported by other routes) ====================
+// ==================== ARCHIVE HELPERS ====================
 
-// Archive a single document (moves it out of the active collection, but keeps
-// a full snapshot so it can be restored later).
+// Archive a single document. The snapshot always gets a friendly
+// `student_name` (for fees) so the UI can display it forever, even after
+// the student itself has been permanently deleted.
 const archiveDocument = async ({ entity_type, doc, reason = '', archived_by = null }) => {
   if (!doc) throw new Error('Document is required to archive');
   if (!MODELS[entity_type]) throw new Error(`Unknown entity type: ${entity_type}`);
@@ -40,12 +41,40 @@ const archiveDocument = async ({ entity_type, doc, reason = '', archived_by = nu
   const plain = doc.toObject ? doc.toObject() : { ...doc };
   delete plain.__v;
 
+  // ---------- Stamp a durable student_name into Fee snapshots ----------
+  if (entity_type === 'Fee') {
+    // `student_id` might be a populated object OR a raw ObjectId
+    const rawStudent = plain.student_id;
+    let studentName = '';
+
+    if (rawStudent && typeof rawStudent === 'object' && rawStudent.name) {
+      // Already populated
+      studentName = rawStudent.name;
+      // Store only the id (so restore doesn't try to embed the whole object)
+      plain.student_id = rawStudent._id;
+    } else if (rawStudent) {
+      // Raw ObjectId — look the student up for the name
+      try {
+        const s = await Student.findById(rawStudent).select('name');
+        if (s) studentName = s.name;
+      } catch { /* non-fatal */ }
+    }
+
+    plain.student_name = studentName || 'Student';
+  }
+
   // Pick a friendly label for the archive list
   let label = '';
-  if (entity_type === 'Student') label = plain.name || 'Student';
-  else if (entity_type === 'Fee') label = `${plain.invoice_number || 'Invoice'} — ${plain.fee_period?.month || ''}`.trim();
-  else if (entity_type === 'Expense') label = `${plain.category || 'Expense'} — ₹${plain.amount || 0}`;
-  else if (entity_type === 'Salary') label = `${plain.month ? new Date(plain.month).toISOString().slice(0, 7) : ''} — ₹${plain.net_salary || 0}`.trim();
+  if (entity_type === 'Student') {
+    label = plain.name || 'Student';
+  } else if (entity_type === 'Fee') {
+    const sName = plain.student_name || 'Student';
+    label = `${sName} — ${plain.invoice_number || 'Invoice'}${plain.fee_period?.month ? ' (' + plain.fee_period.month + ')' : ''}`;
+  } else if (entity_type === 'Expense') {
+    label = `${plain.category || 'Expense'} — ₹${plain.amount || 0}`;
+  } else if (entity_type === 'Salary') {
+    label = `${plain.month ? new Date(plain.month).toISOString().slice(0, 7) : ''} — ₹${plain.net_salary || 0}`.trim();
+  }
 
   const entry = await Archive.create({
     entity_type,
@@ -96,9 +125,20 @@ router.get('/', async (req, res) => {
       ];
     }
 
-    const archives = await Archive.find(query).sort({ archived_at: -1 });
+    // Only pull the fields the list UI needs — keeps the payload small.
+    const archives = await Archive.find(query)
+      .select(
+        'entity_type entity_id label archive_reason archived_at ' +
+        'snapshot.student_name snapshot.student_id ' +
+        'snapshot.invoice_number snapshot.fee_period.month ' +
+        'snapshot.total_amount snapshot.paid_amount snapshot.remaining_amount ' +
+        'snapshot.name snapshot.class_id snapshot.section snapshot.parent_name snapshot.parent_phone ' +
+        'snapshot.category snapshot.vendor_name snapshot.amount ' +
+        'snapshot.month snapshot.net_salary snapshot.staff_id ' +
+        'snapshot.status snapshot.due_date'
+      )
+      .sort({ archived_at: -1 });
 
-    // Light summary for cards
     const summary = {
       total: await Archive.countDocuments(),
       Student: await Archive.countDocuments({ entity_type: 'Student' }),
@@ -126,7 +166,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/archives/:id/restore — put the record back into its live collection
+// POST /api/archives/:id/restore
 router.post('/:id/restore', async (req, res) => {
   try {
     const entry = await Archive.findById(req.params.id);
@@ -135,20 +175,16 @@ router.post('/:id/restore', async (req, res) => {
     const Model = MODELS[entry.entity_type];
     if (!Model) return res.status(400).json({ message: 'Unknown entity type' });
 
-    // If the original _id is still in use (shouldn't happen, but be safe),
-    // let Mongo generate a new one.
     const snapshot = { ...entry.snapshot };
+    delete snapshot.student_name; // our added helper field, not part of the Fee schema
+
     const existing = await Model.findById(snapshot._id);
     if (existing) delete snapshot._id;
 
-    // Restore via the model's normal save path so pre-save hooks (invoice
-    // counter, fee total recalculation, etc.) run as usual.
     const doc = new Model(snapshot);
-    // Mark as not-new for _id preservation:
     doc.isNew = true;
     const saved = await doc.save();
 
-    // When restoring a Student, also restore any of their archived fee invoices
     let restoredFees = 0;
     if (entry.entity_type === 'Student') {
       const pendingFeeArchives = await Archive.find({
@@ -157,6 +193,7 @@ router.post('/:id/restore', async (req, res) => {
       });
       for (const feeArchive of pendingFeeArchives) {
         const feeSnap = { ...feeArchive.snapshot, student_id: saved._id };
+        delete feeSnap.student_name;
         try {
           const feeDoc = new Fee(feeSnap);
           feeDoc.isNew = true;
@@ -194,7 +231,6 @@ router.delete('/:id', async (req, res) => {
     const entry = await Archive.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: 'Archive entry not found' });
 
-    // Clean up Cloudinary assets tied to this snapshot, if any
     const paths = CLOUDINARY_FIELDS[entry.entity_type] || [];
     for (const p of paths) {
       const url = getPath(entry.snapshot, p);
@@ -203,7 +239,6 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
-    // Audit + remove
     entry.permanent_delete_reason = reason;
     entry.permanently_deleted_at = new Date();
     await entry.save();
@@ -216,7 +251,7 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/archives/empty/all — permanently empty the whole archive (admin)
+// DELETE /api/archives/empty/all
 router.delete('/empty/all', async (req, res) => {
   try {
     const { reason } = req.body || {};
@@ -232,8 +267,6 @@ router.delete('/empty/all', async (req, res) => {
 });
 
 // ==================== ARCHIVED STUDENT FULL PROFILE ====================
-// Returns the student archive entry + every archived fee invoice + the merged
-// payment history, so the UI can render the full "Archived Student Profile".
 router.get('/:id/student-profile', async (req, res) => {
   try {
     const entry = await Archive.findById(req.params.id);
@@ -244,7 +277,6 @@ router.get('/:id/student-profile', async (req, res) => {
 
     const studentId = entry.snapshot?._id;
 
-    // Every archived fee invoice whose snapshot points at this student
     const feeArchives = await Archive.find({
       entity_type: 'Fee',
       'snapshot.student_id': studentId,
@@ -252,7 +284,7 @@ router.get('/:id/student-profile', async (req, res) => {
 
     const feeInvoices = feeArchives.map((f) => f.snapshot);
 
-    // Merge payment history from all invoices, sorted newest first
+    // Merge payment history
     const payments = [];
     for (const inv of feeInvoices) {
       const history = Array.isArray(inv.payment_history) ? inv.payment_history : [];
@@ -269,7 +301,6 @@ router.get('/:id/student-profile', async (req, res) => {
           advance_allocation: p.advance_allocation || [],
         });
       }
-      // Older invoices may have paid_amount but no explicit history — reflect that too
       if (history.length === 0 && (inv.paid_amount || 0) > 0) {
         const total = inv.total_amount || 0;
         payments.push({
@@ -303,7 +334,7 @@ router.get('/:id/student-profile', async (req, res) => {
       student: entry.snapshot,
       archive_reason: entry.archive_reason,
       archived_at: entry.archived_at,
-      fee_archive_ids: feeArchives.map((f) => f._id),   // for restore bookkeeping
+      fee_archive_ids: feeArchives.map((f) => f._id),
       fee_invoices: feeInvoices,
       payments,
       totals,
@@ -313,9 +344,8 @@ router.get('/:id/student-profile', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
 // ==================== EXPORTS ====================
-// IMPORTANT: attach helpers to the router object (do NOT reassign module.exports
-// after this line, or the helpers will be lost).
 router.archiveDocument = archiveDocument;
 router.archiveStudentWithFees = archiveStudentWithFees;
 
