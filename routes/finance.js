@@ -8,6 +8,7 @@ const Staff = require('../models/Staff');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, monthKey, forceDueDate } = require('../utils/feeDates');
 const { dayStr } = require('../utils/feeStatus');
+const { archiveDocument } = require('./archives');
 
 // Returns a plain object with live status/balance merged in.
 const toLive = (feeDoc) =>
@@ -776,22 +777,18 @@ router.put('/fees/:id', async (req, res) => {
   }
 });
 
+// ==================== DELETE FEE (SOFT / ARCHIVE) ====================
 router.delete('/fees/:id', async (req, res) => {
   try {
     const fee = await Fee.findById(req.params.id);
+    if (!fee) return res.status(404).json({ message: 'Fee record not found' });
 
-    if (!fee) {
-      return res.status(404).json({ message: 'Fee record not found' });
-    }
+    const reason = req.body?.reason || req.query.reason || '';
+    await archiveDocument({ entity_type: 'Fee', doc: fee, reason });
 
-    if (fee.receipt_url) {
-      await deleteFromCloudinary(fee.receipt_url);
-    }
-
-    await Fee.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Fee record deleted successfully' });
+    res.json({ success: true, message: 'Fee record archived' });
   } catch (error) {
-    console.error('Error deleting fee record:', error);
+    console.error('Error archiving fee record:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -947,22 +944,18 @@ router.put('/expenses/:id', async (req, res) => {
   }
 });
 
+// ==================== DELETE EXPENSE (SOFT / ARCHIVE) ====================
 router.delete('/expenses/:id', async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
+    if (!expense) return res.status(404).json({ message: 'Expense not found' });
 
-    if (!expense) {
-      return res.status(404).json({ message: 'Expense not found' });
-    }
+    const reason = req.body?.reason || req.query.reason || '';
+    await archiveDocument({ entity_type: 'Expense', doc: expense, reason });
 
-    if (expense.receipt_url) {
-      await deleteFromCloudinary(expense.receipt_url);
-    }
-
-    await Expense.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Expense deleted successfully' });
+    res.json({ success: true, message: 'Expense archived' });
   } catch (error) {
-    console.error('Error deleting expense:', error);
+    console.error('Error archiving expense:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -1166,22 +1159,50 @@ router.put('/salaries/:id', async (req, res) => {
   }
 });
 
+// ==================== DELETE FEE (SOFT / ARCHIVE) ====================
+router.delete('/fees/:id', async (req, res) => {
+  try {
+    const fee = await Fee.findById(req.params.id);
+    if (!fee) return res.status(404).json({ message: 'Fee record not found' });
+
+    const reason = req.body?.reason || req.query.reason || '';
+    await archiveDocument({ entity_type: 'Fee', doc: fee, reason });
+
+    res.json({ success: true, message: 'Fee record archived' });
+  } catch (error) {
+    console.error('Error archiving fee record:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ==================== DELETE EXPENSE (SOFT / ARCHIVE) ====================
+router.delete('/expenses/:id', async (req, res) => {
+  try {
+    const expense = await Expense.findById(req.params.id);
+    if (!expense) return res.status(404).json({ message: 'Expense not found' });
+
+    const reason = req.body?.reason || req.query.reason || '';
+    await archiveDocument({ entity_type: 'Expense', doc: expense, reason });
+
+    res.json({ success: true, message: 'Expense archived' });
+  } catch (error) {
+    console.error('Error archiving expense:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ==================== DELETE SALARY (SOFT / ARCHIVE) ====================
 router.delete('/salaries/:id', async (req, res) => {
   try {
     const salary = await Salary.findById(req.params.id);
+    if (!salary) return res.status(404).json({ message: 'Salary record not found' });
 
-    if (!salary) {
-      return res.status(404).json({ message: 'Salary record not found' });
-    }
+    const reason = req.body?.reason || req.query.reason || '';
+    await archiveDocument({ entity_type: 'Salary', doc: salary, reason });
 
-    if (salary.salary_slip_url) {
-      await deleteFromCloudinary(salary.salary_slip_url);
-    }
-
-    await Salary.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Salary record deleted successfully' });
+    res.json({ success: true, message: 'Salary record archived' });
   } catch (error) {
-    console.error('Error deleting salary record:', error);
+    console.error('Error archiving salary record:', error);
     res.status(500).json({ message: error.message });
   }
 });

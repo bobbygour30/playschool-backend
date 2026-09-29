@@ -9,6 +9,8 @@ const Fee = require('../models/Fee');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, forceDueDate, monthKey } = require('../utils/feeDates');
+const { archiveStudentWithFees } = require('./archives');
+
 
 // ==================== FEE STRUCTURE DEFINITIONS ====================
 const FEE_STRUCTURES = {
@@ -1198,49 +1200,33 @@ router.patch('/:id/fee', async (req, res) => {
   }
 });
 
-// ==================== DELETE STUDENT ====================
+// ==================== DELETE STUDENT (SOFT / ARCHIVE) ====================
 router.delete('/:id', async (req, res) => {
   try {
     const student = await Student.findById(req.params.id);
-
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
     }
 
-    if (student.documents) {
-      if (student.documents.student_photo) {
-        await deleteFromCloudinary(student.documents.student_photo);
-      }
-      if (student.documents.birth_certificate) {
-        await deleteFromCloudinary(student.documents.birth_certificate);
-      }
-      if (student.documents.aadhar_card) {
-        await deleteFromCloudinary(student.documents.aadhar_card);
-      }
-      if (student.documents.parent_aadhar_front) {
-        await deleteFromCloudinary(student.documents.parent_aadhar_front);
-      }
-      if (student.documents.parent_aadhar_back) {
-        await deleteFromCloudinary(student.documents.parent_aadhar_back);
-      }
-    }
+    const reason = req.body?.reason || req.query.reason || '';
 
-    try {
-      await Fee.deleteMany({ student_id: student._id });
-    } catch (feeError) {
-      console.error('Error deleting fee records:', feeError.message);
-    }
+    // Archive the student + all their invoices (moves them out of the live
+    // collections; nothing is destroyed yet).
+    const entries = await archiveStudentWithFees(student, reason, null);
 
-    await syncStudentToMobile(student, true);
+    // Best-effort: tell the mobile backend the student is gone.
+    try { await syncStudentToMobile(student, true); } catch (e) { /* non-fatal */ }
 
-    await Student.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Student deleted successfully' });
+    res.json({
+      success: true,
+      message: `Student archived (${entries.length} record${entries.length === 1 ? '' : 's'})`,
+      archived_count: entries.length,
+    });
   } catch (error) {
-    console.error('Error deleting student:', error);
+    console.error('Error archiving student:', error);
     res.status(500).json({ message: error.message });
   }
 });
-
 // ==================== SYNC ALL STUDENTS TO MOBILE ====================
 router.post('/sync-to-mobile', async (req, res) => {
   try {

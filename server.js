@@ -91,7 +91,7 @@ app.use('/api/enquiries', require('./routes/enquiries'));
 app.use('/api/lunch-menu', require('./routes/lunchMenuRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/api/achievements', require('./routes/achievementRoutes'));
-
+app.use('/api/archives', require('./routes/archives')); 
 
 
 // ==================== ERROR HANDLER ====================
