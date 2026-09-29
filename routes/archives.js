@@ -231,6 +231,88 @@ router.delete('/empty/all', async (req, res) => {
   }
 });
 
+// ==================== ARCHIVED STUDENT FULL PROFILE ====================
+// Returns the student archive entry + every archived fee invoice + the merged
+// payment history, so the UI can render the full "Archived Student Profile".
+router.get('/:id/student-profile', async (req, res) => {
+  try {
+    const entry = await Archive.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: 'Archive entry not found' });
+    if (entry.entity_type !== 'Student') {
+      return res.status(400).json({ message: 'This archive entry is not a student' });
+    }
+
+    const studentId = entry.snapshot?._id;
+
+    // Every archived fee invoice whose snapshot points at this student
+    const feeArchives = await Archive.find({
+      entity_type: 'Fee',
+      'snapshot.student_id': studentId,
+    }).sort({ archived_at: -1 });
+
+    const feeInvoices = feeArchives.map((f) => f.snapshot);
+
+    // Merge payment history from all invoices, sorted newest first
+    const payments = [];
+    for (const inv of feeInvoices) {
+      const history = Array.isArray(inv.payment_history) ? inv.payment_history : [];
+      for (const p of history) {
+        payments.push({
+          invoice_number: p.invoice_number || inv.invoice_number,
+          fee_period: inv.fee_period?.month,
+          date: p.payment_date || p.recorded_at,
+          amount: p.amount || 0,
+          payment_type: p.payment_type,
+          payment_method: p.payment_method,
+          transaction_id: p.transaction_id,
+          notes: p.notes,
+          advance_allocation: p.advance_allocation || [],
+        });
+      }
+      // Older invoices may have paid_amount but no explicit history — reflect that too
+      if (history.length === 0 && (inv.paid_amount || 0) > 0) {
+        const total = inv.total_amount || 0;
+        payments.push({
+          invoice_number: inv.invoice_number,
+          fee_period: inv.fee_period?.month,
+          date: inv.payment_date || inv.invoice_date,
+          amount: inv.paid_amount,
+          payment_type: inv.paid_amount > total ? 'advance' : inv.paid_amount < total ? 'partial' : 'full',
+          payment_method: inv.payment_method,
+          transaction_id: inv.transaction_id,
+          notes: 'Payment recorded on the invoice',
+          advance_allocation: [],
+        });
+      }
+    }
+    payments.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+    const totals = feeInvoices.reduce(
+      (acc, inv) => {
+        acc.charged += inv.total_amount || 0;
+        acc.paid += inv.paid_amount || 0;
+        return acc;
+      },
+      { charged: 0, paid: 0 }
+    );
+    totals.outstanding = Math.max(0, totals.charged - totals.paid);
+    totals.advance = Math.max(0, totals.paid - totals.charged);
+
+    res.json({
+      student_archive_id: entry._id,
+      student: entry.snapshot,
+      archive_reason: entry.archive_reason,
+      archived_at: entry.archived_at,
+      fee_archive_ids: feeArchives.map((f) => f._id),   // for restore bookkeeping
+      fee_invoices: feeInvoices,
+      payments,
+      totals,
+    });
+  } catch (error) {
+    console.error('Error fetching archived student profile:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
 // ==================== EXPORTS ====================
 // IMPORTANT: attach helpers to the router object (do NOT reassign module.exports
 // after this line, or the helpers will be lost).

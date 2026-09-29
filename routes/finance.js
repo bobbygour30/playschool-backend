@@ -50,19 +50,22 @@ const ensureInvoiceForMonth = async (student, monthStr, { force = false } = {}) 
   return forceDueDate(Fee, invoice, monthStr, dueDay);
 };
 
-// ==================== FEE MANAGEMENT ====================
-
+// routes/finance.js — GET /fees
 router.get('/fees', async (req, res) => {
   try {
-    const {
-      status, studentId, startDate, endDate, month,
-      page = 1,
-      limit = 1000,
-    } = req.query;
+    const { status, studentId, startDate, endDate, month, page = 1, limit = 1000 } = req.query;
 
-    let query = {};
+    // Safety: never return invoices whose student is currently archived.
+    // (Archived students have no live Student document, so their _id won't
+    //  exist in the Student collection. Filter those out explicitly.)
+    const Student = require('../models/Student');
+    const liveStudents = await Student.find({}, '_id');
+    const liveStudentIds = liveStudents.map((s) => s._id);
+
+    let query = { student_id: { $in: liveStudentIds } };
+
     if (status && status !== 'all') query.status = status;
-    if (studentId) query.student_id = studentId;
+    if (studentId) query.student_id = studentId; // will simply return [] for archived
     if (month) query['fee_period.month'] = month;
     if (startDate || endDate) {
       query.due_date = {};
