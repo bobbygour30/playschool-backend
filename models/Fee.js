@@ -8,7 +8,7 @@ const feeSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
-  
+
   registration_fee: { type: Number, default: 0 },
   admission_fee: { type: Number, default: 0 },
   tuition_fee: { type: Number, default: 0 },
@@ -16,7 +16,8 @@ const feeSchema = new mongoose.Schema({
   kit_fee: { type: Number, default: 0 },
   transport_fee: { type: Number, default: 0 },
   camera_fee: { type: Number, default: 0 },
-  
+  discount: { type: Number, default: 0 },
+
   // Recurring fees (monthly)
   recurring_fees: {
     tuition_fee: { type: Number, default: 0 },
@@ -33,21 +34,21 @@ const feeSchema = new mongoose.Schema({
       default: 5,
     },
   },
-  
+
   fee_period: {
     start_date: { type: Date },
     end_date: { type: Date },
     month: { type: String }, // Format: YYYY-MM
   },
-  
+
   fee_plan: {
     type: String,
     enum: ['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly', 'One-Time'],
     default: 'Monthly',
   },
-  
+
   total_amount: { type: Number, default: 0 },
-  
+
   // Payment tracking
   paid_amount: { type: Number, default: 0 },
   // The REAL outstanding amount (total - paid), regardless of due date.
@@ -60,7 +61,7 @@ const feeSchema = new mongoose.Schema({
   balance_due: { type: Number, default: 0 },
   advance_amount: { type: Number, default: 0 },
   overdue_amount: { type: Number, default: 0 },
-  
+
   due_date: {
     type: Date,
     required: true,
@@ -70,7 +71,7 @@ const feeSchema = new mongoose.Schema({
     enum: ['Upcoming', 'Due', 'Pending', 'Paid', 'Overdue', 'Partial', 'Advance', 'No Dues'],
     default: 'Upcoming',
   },
-  
+
   // Payment details
   payment_date: {
     type: Date,
@@ -85,7 +86,7 @@ const feeSchema = new mongoose.Schema({
     type: String,
     default: '',
   },
-  
+
   payment_history: [{
     amount: {
       type: Number,
@@ -136,7 +137,7 @@ const feeSchema = new mongoose.Schema({
       invoice_id: { type: String },
     }],
   }],
-  
+
   invoice_number: {
     type: String,
     unique: true,
@@ -150,7 +151,7 @@ const feeSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
-  
+
   notes: {
     type: String,
     default: '',
@@ -159,7 +160,7 @@ const feeSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
-  
+
   is_recurring: {
     type: Boolean,
     default: false,
@@ -177,7 +178,7 @@ const feeSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
-  
+
   created_at: {
     type: Date,
     default: Date.now,
@@ -227,13 +228,16 @@ feeSchema.methods.toLiveJSON = function () {
 
 // Given a 'YYYY-MM' month and a day-of-month (1-31), returns the due Date
 // for that month, clamped to the month's last valid day (e.g. day 31 in
-// February becomes the 28th/29th).
+// February becomes the 28th/29th). Stored at 12:00 UTC so the calendar day
+// is the same in every timezone (IST, UTC, etc.).
 feeSchema.statics.computeDueDate = function (month, dueDay) {
-  const safeMonth = month || new Date().toISOString().slice(0, 7);
+  const now = new Date();
+  const fallback = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const safeMonth = /^\d{4}-\d{2}$/.test(month || '') ? month : fallback;
   const [year, mon] = safeMonth.split('-').map(Number);
-  const daysInMonth = new Date(year, mon, 0).getDate();
+  const daysInMonth = new Date(Date.UTC(year, mon, 0)).getUTCDate();
   const day = Math.min(Math.max(parseInt(dueDay) || 5, 1), daysInMonth);
-  return new Date(year, mon - 1, day);
+  return new Date(Date.UTC(year, mon - 1, day, 12, 0, 0));
 };
 
 feeSchema.pre('save', async function (next) {
@@ -253,14 +257,16 @@ feeSchema.pre('save', async function (next) {
     (this.recurring_fees.activity_fee || 0) +
     (this.recurring_fees.transport_fee || 0);
 
-  // Fix for "Total = 0": a recurring invoice whose one-time fields are empty
-  // falls back to the monthly recurring total instead of becoming 0.
-  this.total_amount =
+  // Prefer the explicit one-time breakdown; for a recurring invoice with empty
+  // one-time fields, fall back to the monthly recurring total. Then subtract
+  // any discount. Never allow a negative total.
+  const gross =
     oneTimeTotal > 0
       ? oneTimeTotal
       : this.is_recurring
       ? this.recurring_fees.total_monthly
       : 0;
+  this.total_amount = Math.max(0, gross - (this.discount || 0));
 
   const live = this.computeLiveStatus();
   this.remaining_amount = live.remaining_amount;
@@ -270,10 +276,30 @@ feeSchema.pre('save', async function (next) {
   this.status = live.status;
 
   if (!this.invoice_number) {
-    const year = new Date().getFullYear();
-    const month = String(new Date().getMonth() + 1).padStart(2, '0');
-    const count = await mongoose.model('Fee').countDocuments();
-    this.invoice_number = `INV-${year}${month}-${String(count + 1).padStart(4, '0')}`;
+    const Counter = require('./Counter');
+    const Fee = mongoose.model('Fee');
+    const now = new Date();
+    const prefix = `INV-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const key = `invoice-${prefix}`;
+
+    // First time only: start from the highest existing number so nothing collides
+    const existing = await Counter.findById(key);
+    if (!existing) {
+      const last = await Fee.findOne({ invoice_number: new RegExp(`^${prefix}-`) })
+        .sort({ invoice_number: -1 }).select('invoice_number');
+      const start = last ? parseInt(last.invoice_number.split('-')[2], 10) || 0 : 0;
+      try {
+        await Counter.create({ _id: key, seq: start });
+      } catch (e) {
+        // created by another request concurrently — safe to ignore
+      }
+    }
+    const c = await Counter.findByIdAndUpdate(
+      key,
+      { $inc: { seq: 1 } },
+      { new: true }
+    );
+    this.invoice_number = `${prefix}-${String(c.seq).padStart(4, '0')}`;
   }
 
   next();
@@ -319,10 +345,10 @@ feeSchema.methods.recordPayment = function (paymentData) {
 // due_date computed from the configured monthly due day.
 feeSchema.statics.generateRecurringInvoices = async function (studentId, month, fees, dueDay = 5) {
   const { tuition_fee, activity_fee, transport_fee } = fees;
-  
+
   const totalMonthly = (tuition_fee || 0) + (activity_fee || 0) + (transport_fee || 0);
   const dueDate = this.computeDueDate(month, dueDay);
-  
+
   const invoice = new this({
     student_id: studentId,
     recurring_fees: {
@@ -335,7 +361,6 @@ feeSchema.statics.generateRecurringInvoices = async function (studentId, month, 
     tuition_fee: tuition_fee || 0,
     activity_fee: activity_fee || 0,
     transport_fee: transport_fee || 0,
-    total_amount: totalMonthly,
     due_date: dueDate,
     fee_period: {
       start_date: new Date(month + '-01'),
@@ -346,7 +371,7 @@ feeSchema.statics.generateRecurringInvoices = async function (studentId, month, 
     is_recurring: true,
     generated_for_month: month,
   });
-  
+
   await invoice.save();
   return invoice;
 };

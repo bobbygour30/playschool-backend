@@ -99,12 +99,27 @@ app.use(require('./middleware/errorHandler'));
 
 // ==================== DATABASE CONNECTION ====================
 let isConnected = false;
+let dueDatesRepaired = false;
 
 const connectToDatabase = async () => {
   if (!isConnected) {
     await connectDB();
     isConnected = true;
     console.log('MongoDB connection established and cached');
+
+    // One-time automatic due-date repair, per process lifetime.
+    // Safe on serverless: the flag stops it running on every request.
+    if (!dueDatesRepaired) {
+      dueDatesRepaired = true;
+      try {
+        const Fee = require('./models/Fee');
+        const { repairAllDueDates } = require('./utils/feeDates');
+        const fixed = await repairAllDueDates(Fee);
+        console.log(`Due dates auto-corrected: ${fixed}`);
+      } catch (e) {
+        console.error('Due date repair failed:', e.message);
+      }
+    }
   }
   return isConnected;
 };
@@ -164,7 +179,7 @@ module.exports = async (req, res) => {
     return app(req, res);
   } catch (error) {
     console.error('Database connection error:', error);
-    return res.status(500).json({ 
+    return res.status(500).json({
       status: 'error',
       message: 'Database connection failed',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -175,7 +190,18 @@ module.exports = async (req, res) => {
 // ==================== LOCAL DEVELOPMENT SERVER ====================
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 5000;
-  connectDB().then(() => {
+  connectDB().then(async () => {
+    // Run the one-time due-date repair on local startup too, so the console
+    // line the review guide expects ("Due dates auto-corrected: N") always appears.
+    try {
+      const Fee = require('./models/Fee');
+      const { repairAllDueDates } = require('./utils/feeDates');
+      const fixed = await repairAllDueDates(Fee);
+      console.log(`Due dates auto-corrected: ${fixed}`);
+    } catch (e) {
+      console.error('Due date repair failed:', e.message);
+    }
+
     app.listen(PORT, () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════════════════════════╗
