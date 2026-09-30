@@ -10,6 +10,7 @@ const {
   syncStudentsForTeacher,
   syncFacultyFromStaff,
 } = require('../utils/staffFacultySync');
+const { archiveStaffSalaries, getActor } = require('./archives');
 
 // document field -> cloudinary folder
 const DOC_FOLDERS = {
@@ -263,6 +264,12 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
+    const reasonText = String((req.body && req.body.reason) || '').trim();
+    if (!reasonText) {
+      return res.status(400).json({ message: 'A reason is required to remove a staff member' });
+    }
+    const actor = getActor(req);
+
     if (staff.documents) {
       for (const field of Object.keys(DOC_FOLDERS)) {
         if (staff.documents[field]) {
@@ -274,8 +281,22 @@ router.delete('/:id', async (req, res) => {
     // Students of this teacher become "unassigned"
     await Student.updateMany({ assigned_teacher_id: staff._id }, { $set: { assigned_teacher_id: null } });
 
+    // Salary records + payment history move to Archived salary records (never deleted).
+    // Must happen BEFORE the staff document is removed (the archive keeps their name).
+    const archivedSalaries = await archiveStaffSalaries(staff, {
+      reason: `Staff member removed — ${reasonText}`,
+      reason_type: 'Staff member removed',
+      archived_by: actor.id,
+      archived_by_name: actor.name,
+    });
+
     await Staff.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Staff member deleted successfully' });
+    res.json({
+      message: archivedSalaries.length
+        ? `Staff member deleted. ${archivedSalaries.length} salary record(s) moved to Archived Records.`
+        : 'Staff member deleted successfully',
+      archived_salaries: archivedSalaries.length,
+    });
   } catch (error) {
     console.error('Error deleting staff:', error);
     res.status(500).json({ message: error.message });

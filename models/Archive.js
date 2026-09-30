@@ -1,4 +1,4 @@
-// models/Archive.js
+// models/Archive.js  (REPLACE)
 const mongoose = require('mongoose');
 
 const archiveSchema = new mongoose.Schema({
@@ -23,39 +23,31 @@ const archiveSchema = new mongoose.Schema({
     required: true,
   },
 
-  // Human-friendly label for the UI list (e.g. student name, invoice #)
+  // Human-friendly label for the UI list
   label: { type: String, default: '' },
 
-  // ---- Archive reason (structured) ----
-  archive_reason_type: {
-    type: String,
-    enum: [
-      '',
-      'Duplicate record',
-      'Created by mistake',
-      'Incorrect amount',
-      'Cancelled invoice',
-      'Other',
-    ],
-    default: '',
-  },
+  // ---- Archive / void reason ----
+  // No enum here on purpose: each entity type has its own allowed list, which is
+  // validated in routes/archives.js (REASONS_BY_ENTITY).
+  archive_reason_type: { type: String, default: '' },
   // Display text: for "Other" it's the typed reason, otherwise a composed string
   archive_reason: { type: String, default: '' },
 
-  // ---- Who archived it ----
-  // NOTE: String (not ObjectId) so we can store arbitrary user ids / names
-  //       coming from req.user, headers, or the client without validation issues.
+  // ---- Who archived / voided it ----
   archived_by: { type: String, default: null },
   archived_by_name: { type: String, default: '' },
 
-  // How it was archived: admin action vs. as part of a student archive
+  // How it was archived:
+  //   manual  = admin voided this record directly
+  //   student = archived together with its student
+  //   staff   = archived because the staff member was removed
   archive_source: {
     type: String,
-    enum: ['manual', 'student'],
+    enum: ['manual', 'student', 'staff'],
     default: 'manual',
   },
 
-  // Permanent delete audit
+  // Permanent delete audit (students only — finance can never be permanently deleted)
   permanent_delete_reason: { type: String, default: '' },
   permanently_deleted_at: { type: Date, default: null },
 

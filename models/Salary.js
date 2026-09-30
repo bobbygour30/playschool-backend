@@ -1,4 +1,6 @@
+// models/Salary.js  (REPLACE)
 const mongoose = require('mongoose');
+const auditFields = require('../utils/auditFields');
 
 const salarySchema = new mongoose.Schema({
   staff_id: {
@@ -67,7 +69,10 @@ const salarySchema = new mongoose.Schema({
   },
 });
 
-salarySchema.pre('save', function(next) {
+// Adds created_by_name, last_modified_by, last_modified_by_name, last_modified_at
+auditFields(salarySchema);
+
+salarySchema.pre('save', function (next) {
   this.updated_at = Date.now();
   next();
 });
@@ -75,7 +80,8 @@ salarySchema.pre('save', function(next) {
 // Index for faster queries
 salarySchema.index({ staff_id: 1, month: 1, status: 1 });
 
-// Compound unique index to prevent duplicate salary entries for same staff in same month
+// One LIVE salary per staff per month. (A voided salary lives in the Archive
+// collection, so a corrected salary for the same month can be created.)
 salarySchema.index({ staff_id: 1, month: 1 }, { unique: true });
 
-module.exports = mongoose.model('Salary', salarySchema);
+module.exports = mongoose.models.Salary || mongoose.model('Salary', salarySchema);

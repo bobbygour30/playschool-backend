@@ -8,6 +8,7 @@ const Staff = require('../models/Staff');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, monthKey, forceDueDate } = require('../utils/feeDates');
 const { dayStr } = require('../utils/feeStatus');
+const { stampCreate, stampUpdate } = require('../utils/auditFields');
 const {
   archiveDocument,
   parseArchiveReason,
@@ -370,6 +371,8 @@ router.post('/fees/ensure-invoice', async (req, res) => {
 
 router.post('/fees/record-payment', async (req, res) => {
   try {
+    const actor = getActor(req);
+
     const {
       fee_id,
       amount_paid,
@@ -480,6 +483,8 @@ router.post('/fees/record-payment', async (req, res) => {
         recorded_by: recorded_by || null,
       });
     }
+
+    await Fee.updateOne({ _id: fee_id }, { $set: stampUpdate(actor) });
 
     const updatedFee = await Fee.findById(fee_id).populate('student_id', 'name parent_name class_id');
 
@@ -650,6 +655,8 @@ router.post('/fees', async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
 
+    const actor = getActor(req);
+
     let uploadedReceipt = null;
     if (receipt_url) {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/receipts');
@@ -695,6 +702,7 @@ router.post('/fees', async (req, res) => {
       fee_plan: fee_plan || 'Monthly',
       is_recurring: is_recurring || false,
       recurring_fees: recurring_fees || { tuition_fee: 0, activity_fee: 0, transport_fee: 0, total_monthly: 0, monthly_due_day: 5 },
+      ...stampCreate(actor),
     };
 
     const fee = new Fee(feeData);
@@ -712,6 +720,8 @@ router.post('/fees', async (req, res) => {
 
 router.put('/fees/:id', async (req, res) => {
   try {
+    const actor = getActor(req);
+
     const { id } = req.params;
     const existingFee = await Fee.findById(id);
 
@@ -790,7 +800,7 @@ router.put('/fees/:id', async (req, res) => {
     };
 
     const fee = await Fee.findById(id);
-    Object.assign(fee, feeData);
+    Object.assign(fee, feeData, stampUpdate(actor));
     await fee.save();
 
     const populated = await Fee.findById(id).populate('student_id', 'name parent_name class_id');
@@ -806,7 +816,7 @@ router.put('/fees/:id', async (req, res) => {
 
 router.get('/expenses', async (req, res) => {
   try {
-    const { category, startDate, endDate, page = 1, limit = 50 } = req.query;
+    const { category, startDate, endDate, page = 1, limit = 1000 } = req.query;
     let query = {};
 
     if (category && category !== 'all') {
@@ -860,35 +870,38 @@ router.get('/expenses/:id', async (req, res) => {
 router.post('/expenses', async (req, res) => {
   try {
     const {
-      category,
-      description,
-      amount,
-      date,
-      vendor_name,
-      bill_number,
-      payment_mode,
-      receipt_url,
-      notes,
+      category, description, amount, date,
+      vendor_name, bill_number, payment_mode, receipt_url, notes,
     } = req.body;
+
+    const amt = parseFloat(amount);
+    if (!(amt > 0)) {
+      return res.status(400).json({ message: 'Amount must be greater than zero' });
+    }
+    if (!date) {
+      return res.status(400).json({ message: 'Expense date is required' });
+    }
+
+    const actor = getActor(req);
 
     let uploadedReceipt = null;
     if (receipt_url) {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/expenses');
     }
 
-    const expenseData = {
+    // expense_id is generated automatically by the model (EXP-YYYY-0001)
+    const expense = new Expense({
       category,
       description,
-      amount,
+      amount: amt,
       date: new Date(date),
       vendor_name: vendor_name || '',
       bill_number: bill_number || '',
       payment_mode: payment_mode || 'Cash',
       receipt_url: uploadedReceipt,
       notes: notes || '',
-    };
-
-    const expense = new Expense(expenseData);
+      ...stampCreate(actor),
+    });
     const savedExpense = await expense.save();
 
     res.status(201).json(savedExpense);
@@ -908,16 +921,16 @@ router.put('/expenses/:id', async (req, res) => {
     }
 
     const {
-      category,
-      description,
-      amount,
-      date,
-      vendor_name,
-      bill_number,
-      payment_mode,
-      receipt_url,
-      notes,
+      category, description, amount, date,
+      vendor_name, bill_number, payment_mode, receipt_url, notes,
     } = req.body;
+
+    const amt = parseFloat(amount);
+    if (!(amt > 0)) {
+      return res.status(400).json({ message: 'Amount must be greater than zero' });
+    }
+
+    const actor = getActor(req);
 
     let uploadedReceipt = existingExpense.receipt_url;
     if (receipt_url && receipt_url !== existingExpense.receipt_url) {
@@ -927,22 +940,22 @@ router.put('/expenses/:id', async (req, res) => {
       uploadedReceipt = await uploadToCloudinary(receipt_url, 'finance/expenses');
     }
 
-    const expenseData = {
-      category,
-      description,
-      amount,
-      date: new Date(date),
-      vendor_name: vendor_name || '',
-      bill_number: bill_number || '',
-      payment_mode,
-      receipt_url: uploadedReceipt,
-      notes: notes || '',
-      updated_at: Date.now(),
-    };
-
+    // expense_id and created_* are never overwritten
     const expense = await Expense.findByIdAndUpdate(
       id,
-      expenseData,
+      {
+        category,
+        description,
+        amount: amt,
+        date: new Date(date),
+        vendor_name: vendor_name || '',
+        bill_number: bill_number || '',
+        payment_mode: payment_mode || existingExpense.payment_mode,
+        receipt_url: uploadedReceipt,
+        notes: notes || '',
+        updated_at: Date.now(),
+        ...stampUpdate(actor),
+      },
       { new: true, runValidators: true }
     );
 
@@ -953,11 +966,32 @@ router.put('/expenses/:id', async (req, res) => {
   }
 });
 
+// ONE-OFF: give Expense IDs to expenses created before this update.
+// Call once (e.g. from Postman): POST /api/finance/expenses/backfill-ids
+router.post('/expenses/backfill-ids', async (req, res) => {
+  try {
+    const missing = await Expense.find({
+      $or: [{ expense_id: { $exists: false } }, { expense_id: null }, { expense_id: '' }],
+    }).sort({ date: 1, created_at: 1 });
+
+    let updated = 0;
+    for (const e of missing) {
+      const id = await Expense.nextExpenseId(e.date || e.created_at || new Date());
+      await Expense.updateOne({ _id: e._id }, { $set: { expense_id: id } });
+      updated++;
+    }
+    res.json({ success: true, message: `Assigned IDs to ${updated} expense(s)` });
+  } catch (error) {
+    console.error('Error backfilling expense ids:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // ==================== SALARY MANAGEMENT ====================
 
 router.get('/salaries', async (req, res) => {
   try {
-    const { status, staffId, month, page = 1, limit = 50 } = req.query;
+    const { status, staffId, month, page = 1, limit = 1000 } = req.query;
     let query = {};
 
     if (status && status !== 'all') {
@@ -1030,59 +1064,61 @@ router.get('/salaries/staff/:staffId', async (req, res) => {
 router.post('/salaries', async (req, res) => {
   try {
     const {
-      staff_id,
-      month,
-      basic_salary,
-      allowance,
-      deductions,
-      net_salary,
-      status,
-      payment_date,
-      payment_method,
-      transaction_id,
-      remarks,
-      salary_slip_url,
+      staff_id, month, basic_salary, allowance, deductions,
+      status, payment_date, payment_method, transaction_id, remarks, salary_slip_url,
     } = req.body;
 
     const staff = await Staff.findById(staff_id);
     if (!staff) {
       return res.status(404).json({ message: 'Staff member not found' });
     }
+    if (!/^\d{4}-\d{2}/.test(String(month || ''))) {
+      return res.status(400).json({ message: 'Salary month is required' });
+    }
+
+    // Net salary is always calculated on the server
+    const net =
+      (parseFloat(basic_salary) || 0) + (parseFloat(allowance) || 0) - (parseFloat(deductions) || 0);
+    if (net < 0) {
+      return res.status(400).json({ message: 'Deductions cannot be more than basic salary + allowance' });
+    }
 
     const startOfMonth = new Date(month);
-    const endOfMonth = new Date(month);
-    endOfMonth.setMonth(endOfMonth.getMonth() + 1);
+    const endOfMonth = new Date(startOfMonth);
+    endOfMonth.setUTCMonth(endOfMonth.getUTCMonth() + 1);
 
     const existingSalary = await Salary.findOne({
       staff_id,
-      month: { $gte: startOfMonth, $lt: endOfMonth }
+      month: { $gte: startOfMonth, $lt: endOfMonth },
     });
-
     if (existingSalary) {
-      return res.status(400).json({ message: 'Salary already processed for this staff in the selected month' });
+      return res.status(400).json({
+        message: 'Salary already processed for this staff in the selected month. If it was entered wrongly, archive/void it first.',
+      });
     }
+
+    const actor = getActor(req);
 
     let uploadedSlip = null;
     if (salary_slip_url) {
       uploadedSlip = await uploadToCloudinary(salary_slip_url, 'finance/salary_slips');
     }
 
-    const salaryData = {
+    const salary = new Salary({
       staff_id,
-      month: new Date(month),
-      basic_salary,
-      allowance: allowance || 0,
-      deductions: deductions || 0,
-      net_salary,
+      month: startOfMonth,
+      basic_salary: parseFloat(basic_salary) || 0,
+      allowance: parseFloat(allowance) || 0,
+      deductions: parseFloat(deductions) || 0,
+      net_salary: net,
       status: status || 'Pending',
       payment_date: payment_date ? new Date(payment_date) : null,
       payment_method: payment_method || 'Bank Transfer',
       transaction_id: transaction_id || '',
       remarks: remarks || '',
       salary_slip_url: uploadedSlip,
-    };
-
-    const salary = new Salary(salaryData);
+      ...stampCreate(actor),
+    });
     const savedSalary = await salary.save();
 
     const populatedSalary = await Salary.findById(savedSalary._id)
@@ -1091,6 +1127,9 @@ router.post('/salaries', async (req, res) => {
     res.status(201).json(populatedSalary);
   } catch (error) {
     console.error('Error creating salary record:', error);
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'Salary already processed for this staff in the selected month' });
+    }
     res.status(400).json({ message: error.message });
   }
 });
@@ -1105,17 +1144,17 @@ router.put('/salaries/:id', async (req, res) => {
     }
 
     const {
-      basic_salary,
-      allowance,
-      deductions,
-      net_salary,
-      status,
-      payment_date,
-      payment_method,
-      transaction_id,
-      remarks,
-      salary_slip_url,
+      basic_salary, allowance, deductions,
+      status, payment_date, payment_method, transaction_id, remarks, salary_slip_url,
     } = req.body;
+
+    const net =
+      (parseFloat(basic_salary) || 0) + (parseFloat(allowance) || 0) - (parseFloat(deductions) || 0);
+    if (net < 0) {
+      return res.status(400).json({ message: 'Deductions cannot be more than basic salary + allowance' });
+    }
+
+    const actor = getActor(req);
 
     let uploadedSlip = existingSalary.salary_slip_url;
     if (salary_slip_url && salary_slip_url !== existingSalary.salary_slip_url) {
@@ -1125,23 +1164,24 @@ router.put('/salaries/:id', async (req, res) => {
       uploadedSlip = await uploadToCloudinary(salary_slip_url, 'finance/salary_slips');
     }
 
-    const salaryData = {
-      basic_salary,
-      allowance: allowance || 0,
-      deductions: deductions || 0,
-      net_salary,
-      status,
-      payment_date: payment_date ? new Date(payment_date) : null,
-      payment_method,
-      transaction_id: transaction_id || '',
-      remarks: remarks || '',
-      salary_slip_url: uploadedSlip,
-      updated_at: Date.now(),
-    };
-
+    // staff_id, month and created_* are never changed here.
+    // Wrong staff / wrong month => archive/void this record and create a new one.
     const salary = await Salary.findByIdAndUpdate(
       id,
-      salaryData,
+      {
+        basic_salary: parseFloat(basic_salary) || 0,
+        allowance: parseFloat(allowance) || 0,
+        deductions: parseFloat(deductions) || 0,
+        net_salary: net,
+        status: status || existingSalary.status,
+        payment_date: payment_date ? new Date(payment_date) : null,
+        payment_method: payment_method || existingSalary.payment_method,
+        transaction_id: transaction_id || '',
+        remarks: remarks || '',
+        salary_slip_url: uploadedSlip,
+        updated_at: Date.now(),
+        ...stampUpdate(actor),
+      },
       { new: true, runValidators: true }
     ).populate('staff_id', 'name designation');
 
@@ -1157,7 +1197,11 @@ router.put('/salaries/:id', async (req, res) => {
 //         reason: '<required only for Other, optional note otherwise>' }
 const archiveFinanceRecord = (Model, entity_type, niceName) => async (req, res) => {
   try {
-    const parsed = parseArchiveReason({ ...req.query, ...(req.body || {}) }, { required: true });
+    // Each record type has its own allowed reason list (see REASONS_BY_ENTITY in archives.js)
+    const parsed = parseArchiveReason(
+      { ...req.query, ...(req.body || {}) },
+      { required: true, entity_type }
+    );
     if (parsed.error) return res.status(400).json({ success: false, message: parsed.error });
 
     const doc = await Model.findById(req.params.id);

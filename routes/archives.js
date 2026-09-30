@@ -1,9 +1,10 @@
-// routes/archives.js
+// routes/archives.js  (REPLACE)
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const Archive = require('../models/Archive');
 const Student = require('../models/Student');
+const Staff = require('../models/Staff');
 const Fee = require('../models/Fee');
 const Expense = require('../models/Expense');
 const Salary = require('../models/Salary');
@@ -14,6 +15,8 @@ const MODELS = { Student, Fee, Expense, Salary };
 // Finance records can NEVER be permanently deleted. They stay in the archive for audit.
 const FINANCE_TYPES = ['Fee', 'Expense', 'Salary'];
 
+// ---- Allowed archive / void reasons, per record type ----
+// (Frontend mirrors these lists in Finance.jsx: ARCHIVE_REASONS_BY_TYPE)
 const REASON_TYPES = [
   'Duplicate record',
   'Created by mistake',
@@ -21,6 +24,32 @@ const REASON_TYPES = [
   'Cancelled invoice',
   'Other',
 ];
+const EXPENSE_REASON_TYPES = [
+  'Duplicate expense',
+  'Incorrect amount',
+  'Wrong category',
+  'Wrong date',
+  'Entered by mistake',
+  'Cancelled expense',
+  'Other',
+];
+const SALARY_REASON_TYPES = [
+  'Duplicate salary entry',
+  'Incorrect amount',
+  'Wrong month',
+  'Wrong staff member',
+  'Entered by mistake',
+  'Cancelled salary',
+  'Other',
+];
+const REASONS_BY_ENTITY = {
+  Student: REASON_TYPES,
+  Fee: REASON_TYPES,
+  Expense: EXPENSE_REASON_TYPES,
+  Salary: SALARY_REASON_TYPES,
+};
+// Set by the system (not selectable by users) when a staff member is removed
+const STAFF_REMOVED_REASON = 'Staff member removed';
 
 const CLOUDINARY_FIELDS = {
   Student: ['documents.student_photo', 'documents.birth_certificate', 'documents.aadhar_card', 'documents.parent_aadhar_front', 'documents.parent_aadhar_back'],
@@ -38,7 +67,7 @@ const toId = (id) => {
   try { return new mongoose.Types.ObjectId(String(id)); } catch { return id; }
 };
 
-// ==================== SHARED HELPERS (also used by finance.js / students.js) ====================
+// ==================== SHARED HELPERS (also used by finance.js / students.js / staff.js) ====================
 
 // Who is performing the action. Prefers the authenticated user (req.user);
 // falls back to a header / body value if you have no auth middleware.
@@ -49,14 +78,17 @@ const getActor = (req) => {
     name:
       u.name || u.username || u.email ||
       req.get('x-user-name') ||
-      (req.body && req.body.archived_by_name) ||
+      (req.body && (req.body.acted_by_name || req.body.archived_by_name)) ||
       'Admin',
   };
 };
 
 // Validates { reason_type, reason } coming from the client.
+// `entity_type` picks the allowed reason list (defaults to the original fee/student list,
+// so existing callers such as students.js keep working unchanged).
 // Returns { error } or { reason_type, reason (display text) }.
-const parseArchiveReason = (input = {}, { required = true } = {}) => {
+const parseArchiveReason = (input = {}, { required = true, entity_type = 'Fee' } = {}) => {
+  const allowed = REASONS_BY_ENTITY[entity_type] || REASON_TYPES;
   const type = String(input.reason_type || '').trim();
   const text = String(input.reason || '').trim();
 
@@ -64,7 +96,7 @@ const parseArchiveReason = (input = {}, { required = true } = {}) => {
     if (required) return { error: 'Please select a reason for archiving / voiding this record' };
     return { reason_type: '', reason: text };
   }
-  if (!REASON_TYPES.includes(type)) return { error: 'Invalid reason type' };
+  if (!allowed.includes(type)) return { error: 'Invalid reason type' };
   if (type === 'Other' && !text) return { error: 'Please specify the reason' };
 
   const display = type === 'Other' ? text : text ? `${type} — ${text}` : type;
@@ -106,6 +138,7 @@ const archiveDocument = async ({
   const plain = doc.toObject ? doc.toObject() : { ...doc };
   delete plain.__v;
 
+  // Keep the student's name on the invoice snapshot (the student may be archived later)
   if (entity_type === 'Fee') {
     const rawStudent = plain.student_id;
     let studentName = '';
@@ -122,6 +155,26 @@ const archiveDocument = async ({
     plain.student_name = studentName || 'Student';
   }
 
+  // Keep the staff member's name on the salary snapshot (the staff member may be removed)
+  if (entity_type === 'Salary') {
+    const rawStaff = plain.staff_id;
+    let staffName = '';
+    let staffDesignation = '';
+
+    if (rawStaff && typeof rawStaff === 'object' && rawStaff.name) {
+      staffName = rawStaff.name;
+      staffDesignation = rawStaff.designation || '';
+      plain.staff_id = rawStaff._id;
+    } else if (rawStaff) {
+      try {
+        const s = await Staff.findById(rawStaff).select('name designation');
+        if (s) { staffName = s.name; staffDesignation = s.designation || ''; }
+      } catch { /* non-fatal */ }
+    }
+    plain.staff_name = staffName || 'Staff';
+    plain.staff_designation = staffDesignation;
+  }
+
   let label = '';
   if (entity_type === 'Student') {
     label = plain.name || 'Student';
@@ -129,9 +182,10 @@ const archiveDocument = async ({
     const sName = plain.student_name || 'Student';
     label = `${sName} — ${plain.invoice_number || 'Invoice'}${plain.fee_period?.month ? ' (' + plain.fee_period.month + ')' : ''}`;
   } else if (entity_type === 'Expense') {
-    label = `${plain.category || 'Expense'} — ₹${plain.amount || 0}`;
+    label = `${plain.expense_id ? plain.expense_id + ' — ' : ''}${plain.category || 'Expense'} — ₹${plain.amount || 0}`;
   } else if (entity_type === 'Salary') {
-    label = `${plain.month ? new Date(plain.month).toISOString().slice(0, 7) : ''} — ₹${plain.net_salary || 0}`.trim();
+    const m = plain.month ? new Date(plain.month).toISOString().slice(0, 7) : '';
+    label = `${plain.staff_name} — ${m} — ₹${plain.net_salary || 0}`;
   }
 
   const entry = await Archive.create({
@@ -167,6 +221,28 @@ const archiveStudentWithFees = async (student, meta = {}) => {
   return entries;
 };
 
+// Archive ALL salary records (= their payment history) of a staff member who is being removed.
+// Call this BEFORE deleting the Staff document so the name can still be looked up.
+// `meta` = { reason, reason_type, archived_by, archived_by_name }
+const archiveStaffSalaries = async (staff, meta = {}) => {
+  const salaries = await Salary.find({ staff_id: staff._id });
+  const entries = [];
+  for (const salary of salaries) {
+    entries.push(
+      await archiveDocument({
+        entity_type: 'Salary',
+        doc: salary,
+        reason: meta.reason || STAFF_REMOVED_REASON,
+        reason_type: meta.reason_type || STAFF_REMOVED_REASON,
+        archived_by: meta.archived_by || null,
+        archived_by_name: meta.archived_by_name || '',
+        source: 'staff',
+      })
+    );
+  }
+  return entries;
+};
+
 const cleanupCloudinary = async (entry) => {
   const paths = CLOUDINARY_FIELDS[entry.entity_type] || [];
   for (const p of paths) {
@@ -193,6 +269,8 @@ router.get('/', async (req, res) => {
         { archived_by_name: rx },
         { 'snapshot.student_name': rx },
         { 'snapshot.invoice_number': rx },
+        { 'snapshot.expense_id': rx },
+        { 'snapshot.staff_name': rx },
       ];
     }
 
@@ -203,9 +281,12 @@ router.get('/', async (req, res) => {
         'snapshot.invoice_number snapshot.fee_period.month ' +
         'snapshot.total_amount snapshot.paid_amount snapshot.remaining_amount ' +
         'snapshot.name snapshot.class_id snapshot.section snapshot.parent_name snapshot.parent_phone ' +
-        'snapshot.category snapshot.vendor_name snapshot.amount ' +
-        'snapshot.month snapshot.net_salary snapshot.staff_id ' +
-        'snapshot.status snapshot.due_date'
+        'snapshot.category snapshot.vendor_name snapshot.amount snapshot.expense_id snapshot.description ' +
+        'snapshot.date snapshot.payment_mode snapshot.bill_number ' +
+        'snapshot.month snapshot.net_salary snapshot.basic_salary snapshot.allowance snapshot.deductions ' +
+        'snapshot.staff_id snapshot.staff_name snapshot.staff_designation ' +
+        'snapshot.status snapshot.due_date ' +
+        'snapshot.created_by_name snapshot.created_at snapshot.last_modified_by_name snapshot.last_modified_at'
       )
       .sort({ archived_at: -1 });
 
@@ -302,6 +383,7 @@ router.get('/:id/student-profile', async (req, res) => {
   }
 });
 
+// Full entry (complete snapshot + archive audit info) — used by the "Details" modal
 router.get('/:id', async (req, res) => {
   try {
     const entry = await Archive.findById(req.params.id);
@@ -335,12 +417,45 @@ router.post('/:id/restore', async (req, res) => {
       }
     }
 
+    // A salary can't live without its staff member
+    if (entry.entity_type === 'Salary') {
+      const liveStaff = await Staff.exists({ _id: snapshot.staff_id });
+      if (!liveStaff) {
+        return res.status(400).json({
+          message: `The staff member (${snapshot.staff_name || 'unknown'}) no longer exists, so this salary record cannot be restored. It stays here as a permanent audit record.`,
+        });
+      }
+      delete snapshot.staff_name;
+      delete snapshot.staff_designation;
+    }
+
+    // Record who restored a finance record (shows up as "Last modified by")
+    if (FINANCE_TYPES.includes(entry.entity_type)) {
+      const actor = getActor(req);
+      snapshot.last_modified_by = actor.id;
+      snapshot.last_modified_by_name = actor.name;
+      snapshot.last_modified_at = new Date();
+    }
+
     const existing = await Model.findById(snapshot._id);
     if (existing) delete snapshot._id;
 
-    const doc = new Model(snapshot);
-    doc.isNew = true;
-    const saved = await doc.save();
+    let saved;
+    try {
+      const doc = new Model(snapshot);
+      doc.isNew = true;
+      saved = await doc.save();
+    } catch (err) {
+      if (err && err.code === 11000) {
+        return res.status(409).json({
+          message:
+            entry.entity_type === 'Salary'
+              ? 'Cannot restore: an active salary record already exists for this staff member and month. Void or edit that one first.'
+              : 'Cannot restore: a record with the same unique key already exists.',
+        });
+      }
+      throw err;
+    }
 
     let restoredFees = 0;
     if (entry.entity_type === 'Student') {
@@ -441,11 +556,13 @@ router.delete('/:id', async (req, res) => {
 // ==================== EXPORTS ====================
 router.archiveDocument = archiveDocument;
 router.archiveStudentWithFees = archiveStudentWithFees;
+router.archiveStaffSalaries = archiveStaffSalaries;
 router.parseArchiveReason = parseArchiveReason;
 router.getActor = getActor;
 router.isStudentArchived = isStudentArchived;
 router.hasArchivedInvoice = hasArchivedInvoice;
 router.REASON_TYPES = REASON_TYPES;
+router.REASONS_BY_ENTITY = REASONS_BY_ENTITY;
 router.FINANCE_TYPES = FINANCE_TYPES;
 
 module.exports = router;

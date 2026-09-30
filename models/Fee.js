@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { computeFeeStatus } = require('../utils/feeStatus');
+const auditFields = require('../utils/auditFields');
 
 const feeSchema = new mongoose.Schema({
   student_id: {
@@ -375,5 +376,7 @@ feeSchema.statics.generateRecurringInvoices = async function (studentId, month, 
   await invoice.save();
   return invoice;
 };
+
+feeSchema.plugin(auditFields);
 
 module.exports = mongoose.model('Fee', feeSchema);
