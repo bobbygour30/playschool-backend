@@ -9,7 +9,13 @@ const Fee = require('../models/Fee');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, forceDueDate, monthKey } = require('../utils/feeDates');
-const { archiveStudentWithFees } = require('./archives');
+const {
+  archiveStudentWithFees,
+  parseArchiveReason,
+  getActor,
+  isStudentArchived,
+  hasArchivedInvoice,
+} = require('./archives');
 
 
 // ==================== FEE STRUCTURE DEFINITIONS ====================
@@ -245,6 +251,11 @@ const createInitialFeeInvoice = async (studentData, paymentInfo) => {
 // Only ever touches the invoice of the student's START month, and never one with payments.
 const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
   try {
+    // ⛔ Archived students never get new/updated invoices
+    if (await isStudentArchived(studentData)) {
+      return { success: true, data: null, action: 'skipped-archived' };
+    }
+
     const startMonth = studentData.recurring_fees?.start_month || monthKey(0);
     const dueDay = studentData.recurring_fees?.monthly_due_day || 5;
     const dueDate = dueDateFor(startMonth, dueDay);
@@ -293,6 +304,11 @@ const syncStudentFeesToFinance = async (studentData, isUpdate = false) => {
       });
       await existingFee.save();   // pre-save recalculates total/status consistently
       return { success: true, data: existingFee, action: 'updated' };
+    }
+
+    // Don't resurrect an invoice an admin voided on purpose
+    if (await hasArchivedInvoice(studentData._id, startMonth)) {
+      return { success: true, data: null, action: 'skipped-voided' };
     }
 
     const newFee = new Fee({
@@ -1208,13 +1224,22 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Student not found' });
     }
 
-    const reason = req.body?.reason || req.query.reason || '';
+    // Reason is optional for students; if a type is sent it is validated.
+    const parsed = parseArchiveReason(
+      { ...req.query, ...(req.body || {}) },
+      { required: false }
+    );
+    if (parsed.error) return res.status(400).json({ message: parsed.error });
 
-    // Archive the student + all their invoices (moves them out of the live
-    // collections; nothing is destroyed yet).
-    const entries = await archiveStudentWithFees(student, reason, null);
+    const actor = getActor(req);
 
-    // Best-effort: tell the mobile backend the student is gone.
+    const entries = await archiveStudentWithFees(student, {
+      reason: parsed.reason,
+      reason_type: parsed.reason_type,
+      archived_by: actor.id,
+      archived_by_name: actor.name,
+    });
+
     try { await syncStudentToMobile(student, true); } catch (e) { /* non-fatal */ }
 
     res.json({
@@ -1227,6 +1252,7 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
 // ==================== SYNC ALL STUDENTS TO MOBILE ====================
 router.post('/sync-to-mobile', async (req, res) => {
   try {

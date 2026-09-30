@@ -8,7 +8,13 @@ const Staff = require('../models/Staff');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, monthKey, forceDueDate } = require('../utils/feeDates');
 const { dayStr } = require('../utils/feeStatus');
-const { archiveDocument } = require('./archives');
+const {
+  archiveDocument,
+  parseArchiveReason,
+  getActor,
+  isStudentArchived,
+  hasArchivedInvoice,
+} = require('./archives');
 
 // Returns a plain object with live status/balance merged in.
 const toLive = (feeDoc) =>
@@ -16,7 +22,14 @@ const toLive = (feeDoc) =>
 
 // Creates the recurring invoice for a month if it doesn't exist yet.
 // Always guarantees due_date = that month + the student's configured due day.
-const ensureInvoiceForMonth = async (student, monthStr, { force = false } = {}) => {
+const ensureInvoiceForMonth = async (
+  student,
+  monthStr,
+  { force = false, respectVoided = false } = {}
+) => {
+  // ⛔ Archived students never get new invoices (not even when forced)
+  if (await isStudentArchived(student)) return null;
+
   const rf = student.recurring_fees || {};
   const monthly = (rf.tuition_fee || 0) + (rf.activity_fee || 0) + (rf.transport_fee || 0);
   if (monthly <= 0) return null;
@@ -29,6 +42,12 @@ const ensureInvoiceForMonth = async (student, monthStr, { force = false } = {}) 
     is_recurring: true,
   });
   if (existing) return forceDueDate(Fee, existing, monthStr, dueDay);
+
+  // ⛔ An invoice an admin archived/voided must not silently come back
+  //    (explicit "create invoice for this month" still works via force only)
+  if (!force || respectVoided) {
+    if (await hasArchivedInvoice(student._id, monthStr)) return null;
+  }
 
   // Respect the student's recurring window for automatic creation
   // (admin can still force-create any month via /fees/ensure-invoice)
@@ -58,7 +77,6 @@ router.get('/fees', async (req, res) => {
     // Safety: never return invoices whose student is currently archived.
     // (Archived students have no live Student document, so their _id won't
     //  exist in the Student collection. Filter those out explicitly.)
-    const Student = require('../models/Student');
     const liveStudents = await Student.find({}, '_id');
     const liveStudentIds = liveStudents.map((s) => s._id);
 
@@ -308,7 +326,7 @@ router.post('/fees/generate-recurring', async (req, res) => {
         'fee_period.month': monthStr,
         is_recurring: true,
       });
-      const invoice = await ensureInvoiceForMonth(student, monthStr, { force: true });
+      const invoice = await ensureInvoiceForMonth(student, monthStr, { force: true, respectVoided: true });
       if (!already && invoice) generatedInvoices.push(invoice);
     }
 
@@ -332,6 +350,10 @@ router.post('/fees/ensure-invoice', async (req, res) => {
     }
     const student = await Student.findById(student_id);
     if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+
+    if (await isStudentArchived(student)) {
+      return res.status(400).json({ success: false, message: 'This student is archived. No new invoices can be generated.' });
+    }
 
     const invoice = await ensureInvoiceForMonth(student, month, { force: true });
     if (!invoice) {
@@ -522,7 +544,7 @@ router.post('/fees/bulk-generate-recurring', async (req, res) => {
             'fee_period.month': targetMonth,
             is_recurring: true,
           });
-          const invoice = await ensureInvoiceForMonth(student, targetMonth, { force: true });
+          const invoice = await ensureInvoiceForMonth(student, targetMonth, { force: true, respectVoided: true });
           if (!already && invoice) generated++;
         }
       } catch (error) {
@@ -780,22 +802,6 @@ router.put('/fees/:id', async (req, res) => {
   }
 });
 
-// ==================== DELETE FEE (SOFT / ARCHIVE) ====================
-router.delete('/fees/:id', async (req, res) => {
-  try {
-    const fee = await Fee.findById(req.params.id);
-    if (!fee) return res.status(404).json({ message: 'Fee record not found' });
-
-    const reason = req.body?.reason || req.query.reason || '';
-    await archiveDocument({ entity_type: 'Fee', doc: fee, reason });
-
-    res.json({ success: true, message: 'Fee record archived' });
-  } catch (error) {
-    console.error('Error archiving fee record:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
 // ==================== EXPENSE MANAGEMENT ====================
 
 router.get('/expenses', async (req, res) => {
@@ -944,22 +950,6 @@ router.put('/expenses/:id', async (req, res) => {
   } catch (error) {
     console.error('Error updating expense:', error);
     res.status(400).json({ message: error.message });
-  }
-});
-
-// ==================== DELETE EXPENSE (SOFT / ARCHIVE) ====================
-router.delete('/expenses/:id', async (req, res) => {
-  try {
-    const expense = await Expense.findById(req.params.id);
-    if (!expense) return res.status(404).json({ message: 'Expense not found' });
-
-    const reason = req.body?.reason || req.query.reason || '';
-    await archiveDocument({ entity_type: 'Expense', doc: expense, reason });
-
-    res.json({ success: true, message: 'Expense archived' });
-  } catch (error) {
-    console.error('Error archiving expense:', error);
-    res.status(500).json({ message: error.message });
   }
 });
 
@@ -1162,53 +1152,37 @@ router.put('/salaries/:id', async (req, res) => {
   }
 });
 
-// ==================== DELETE FEE (SOFT / ARCHIVE) ====================
-router.delete('/fees/:id', async (req, res) => {
+// ==================== ARCHIVE / VOID (no permanent delete for finance records) ====================
+// Body: { reason_type: 'Duplicate record'|'Created by mistake'|'Incorrect amount'|'Cancelled invoice'|'Other',
+//         reason: '<required only for Other, optional note otherwise>' }
+const archiveFinanceRecord = (Model, entity_type, niceName) => async (req, res) => {
   try {
-    const fee = await Fee.findById(req.params.id);
-    if (!fee) return res.status(404).json({ message: 'Fee record not found' });
+    const parsed = parseArchiveReason({ ...req.query, ...(req.body || {}) }, { required: true });
+    if (parsed.error) return res.status(400).json({ success: false, message: parsed.error });
 
-    const reason = req.body?.reason || req.query.reason || '';
-    await archiveDocument({ entity_type: 'Fee', doc: fee, reason });
+    const doc = await Model.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: `${niceName} not found` });
 
-    res.json({ success: true, message: 'Fee record archived' });
+    const actor = getActor(req);
+    await archiveDocument({
+      entity_type,
+      doc,
+      reason: parsed.reason,
+      reason_type: parsed.reason_type,
+      archived_by: actor.id,
+      archived_by_name: actor.name,
+    });
+
+    res.json({ success: true, message: `${niceName} archived` });
   } catch (error) {
-    console.error('Error archiving fee record:', error);
-    res.status(500).json({ message: error.message });
+    console.error(`Error archiving ${niceName}:`, error);
+    res.status(500).json({ success: false, message: error.message });
   }
-});
+};
 
-// ==================== DELETE EXPENSE (SOFT / ARCHIVE) ====================
-router.delete('/expenses/:id', async (req, res) => {
-  try {
-    const expense = await Expense.findById(req.params.id);
-    if (!expense) return res.status(404).json({ message: 'Expense not found' });
-
-    const reason = req.body?.reason || req.query.reason || '';
-    await archiveDocument({ entity_type: 'Expense', doc: expense, reason });
-
-    res.json({ success: true, message: 'Expense archived' });
-  } catch (error) {
-    console.error('Error archiving expense:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// ==================== DELETE SALARY (SOFT / ARCHIVE) ====================
-router.delete('/salaries/:id', async (req, res) => {
-  try {
-    const salary = await Salary.findById(req.params.id);
-    if (!salary) return res.status(404).json({ message: 'Salary record not found' });
-
-    const reason = req.body?.reason || req.query.reason || '';
-    await archiveDocument({ entity_type: 'Salary', doc: salary, reason });
-
-    res.json({ success: true, message: 'Salary record archived' });
-  } catch (error) {
-    console.error('Error archiving salary record:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
+router.delete('/fees/:id', archiveFinanceRecord(Fee, 'Fee', 'Fee record'));
+router.delete('/expenses/:id', archiveFinanceRecord(Expense, 'Expense', 'Expense'));
+router.delete('/salaries/:id', archiveFinanceRecord(Salary, 'Salary', 'Salary record'));
 
 // ==================== FINANCIAL DASHBOARD STATISTICS ====================
 
