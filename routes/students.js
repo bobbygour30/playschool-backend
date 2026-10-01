@@ -9,6 +9,7 @@ const Fee = require('../models/Fee');
 const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, forceDueDate, monthKey } = require('../utils/feeDates');
+const { upsertParentFromStudent } = require('../utils/parentAutoSync');
 const {
   archiveStudentWithFees,
   parseArchiveReason,
@@ -838,6 +839,16 @@ router.post('/', async (req, res) => {
 
     const syncResult = await syncStudentToMobile(savedStudent);
 
+    // 👨‍👩‍👧 Auto-create / link the parent account in Parent Registration
+    let parentSyncResult = null;
+    try {
+      parentSyncResult = await upsertParentFromStudent(savedStudent);
+      console.log(`👪 Parent sync for ${savedStudent.name}: ${parentSyncResult.action}`);
+    } catch (parentErr) {
+      console.error('Parent auto-sync failed:', parentErr.message);
+      parentSyncResult = { action: 'error', reason: parentErr.message };
+    }
+
     const populatedStudent = await Student.findById(savedStudent._id)
       .populate({
         path: 'assigned_teacher_id',
@@ -849,6 +860,7 @@ router.post('/', async (req, res) => {
     responseData.sync = syncResult;
     responseData.feeSync = feeSyncResult;
     responseData.initialInvoice = initialInvoiceResult;
+    responseData.parentSync = parentSyncResult;
 
     res.status(201).json(responseData);
   } catch (error) {
@@ -1145,9 +1157,19 @@ router.put('/:id', async (req, res) => {
 
     const syncResult = await syncStudentToMobile(student);
 
+    // 👨‍👩‍👧 Keep Parent Registration in step (e.g. parent email/name corrected on the student)
+    let parentSyncResult = null;
+    try {
+      parentSyncResult = await upsertParentFromStudent(student);
+    } catch (parentErr) {
+      console.error('Parent auto-sync failed:', parentErr.message);
+      parentSyncResult = { action: 'error', reason: parentErr.message };
+    }
+
     const responseData = student.toObject();
     responseData.sync = syncResult;
     responseData.feeSync = feeSyncResult;
+    responseData.parentSync = parentSyncResult;
 
     res.json(responseData);
   } catch (error) {

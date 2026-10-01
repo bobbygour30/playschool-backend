@@ -2,22 +2,21 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const parentSchema = new mongoose.Schema({
-  // Personal Information — Father & Mother names captured separately
-  father_name: { type: String, required: true, trim: true },
-  mother_name: { type: String, required: true, trim: true },
+  // Names: at least one of father/mother/guardian must be present (enforced in routes + UI).
+  // Auto-created parents only know the single name entered on the student admission form.
+  father_name: { type: String, default: '', trim: true },
+  mother_name: { type: String, default: '', trim: true },
+  guardian_name: { type: String, default: '', trim: true },
 
   mobile_number: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   address: { type: String, required: true },
 
-  // Student Links — a student may only ever belong to ONE parent record
+  // A student may only ever belong to ONE parent record
   student_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Student' }],
 
-  // Emergency Contact
   emergency_contact: { type: String, required: true },
 
-  // Contact Person Role — who is the primary point of contact for this account.
-  // Intentionally placed after emergency_contact to match the registration form flow.
   contact_person_role: {
     type: String,
     required: true,
@@ -25,18 +24,24 @@ const parentSchema = new mongoose.Schema({
     default: 'Father',
   },
 
-  // Login Credentials — username removed, email is the login identifier now
-  password: { type: String, required: true },
+  // Login credentials — email is the login id.
+  // Password is OPTIONAL now: auto-created parents have none until an admin sets one.
+  password: { type: String, default: null },
+  login_enabled: { type: Boolean, default: false },
 
-  // Status
+  // Where did this record come from?
+  auto_created: { type: Boolean, default: false },
+  source: {
+    type: String,
+    enum: ['manual', 'student_registration', 'migration'],
+    default: 'manual',
+  },
+
   status: { type: String, enum: ['Active', 'Inactive', 'Suspended'], default: 'Active' },
 
-  // Additional Info
   profile_picture: { type: String, default: null },
   notes: { type: String, default: '' },
 
-  // Unlink audit trail — every time a student is removed from this parent,
-  // an admin-supplied reason is recorded here.
   unlink_history: [{
     student_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Student' },
     student_name: { type: String, default: '' },
@@ -54,21 +59,23 @@ const parentSchema = new mongoose.Schema({
   updated_at: { type: Date, default: Date.now },
 });
 
-// Hash password before saving
+// Hash password (only when one is provided and changed) and keep login_enabled in sync
 parentSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
   try {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
     this.updated_at = Date.now();
+    if (this.password && this.isModified('password')) {
+      const salt = await bcrypt.genSalt(10);
+      this.password = await bcrypt.hash(this.password, salt);
+    }
+    this.login_enabled = !!this.password;
     next();
   } catch (error) {
     next(error);
   }
 });
 
-// Compare password method
 parentSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password) return false;
   return await bcrypt.compare(candidatePassword, this.password);
 };
 

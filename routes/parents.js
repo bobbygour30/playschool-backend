@@ -5,6 +5,9 @@ const Student = require('../models/Student');
 const bcrypt = require('bcryptjs');
 const syncToMobileBackend = require('../utils/syncParentToMobile');
 
+// Only parents who actually have a login are pushed to the mobile backend
+const shouldSync = (p) => !!process.env.MOBILE_BACKEND_URL && !!p.login_enabled;
+
 // ==================== HELPERS ====================
 
 // Ensures none of the given studentIds are already linked to a DIFFERENT parent.
@@ -126,47 +129,41 @@ router.get('/:id/available-students', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const {
-      father_name,
-      mother_name,
-      mobile_number,
-      email,
-      address,
-      student_ids,
-      emergency_contact,
-      contact_person_role,
-      password,
-      status,
-      notes,
+      father_name, mother_name, guardian_name, mobile_number, email, address,
+      student_ids, emergency_contact, contact_person_role, password, status, notes,
     } = req.body;
 
-    if (!father_name || !mother_name) {
-      return res.status(400).json({ message: "Father's name and Mother's name are both required" });
+    const emailNorm = (email || '').trim().toLowerCase();
+
+    if (!(father_name || '').trim() && !(mother_name || '').trim() && !(guardian_name || '').trim()) {
+      return res.status(400).json({ message: "At least one of Father's, Mother's or Guardian's name is required" });
     }
-    if (!password) {
-      return res.status(400).json({ message: 'Password is required' });
+    if (!password || password.length < 6) {
+      return res.status(400).json({ message: 'Password is required (minimum 6 characters)' });
     }
 
-    // Check if already exists (username removed — email & mobile only)
     const existingParent = await Parent.findOne({
-      $or: [{ email }, { mobile_number }],
+      $or: [{ email: emailNorm }, { mobile_number }],
     });
     if (existingParent) {
-      return res.status(400).json({ message: 'Parent with this email or mobile number already exists' });
+      return res.status(400).json({
+        message: existingParent.auto_created && !existingParent.login_enabled
+          ? 'A parent record already exists for this email/mobile (auto-created from a student admission). Use Edit on that record to set the login password.'
+          : 'Parent with this email or mobile number already exists',
+      });
     }
 
-    // Make sure any pre-selected students aren't already linked elsewhere
     if (student_ids && student_ids.length > 0) {
       const check = await ensureStudentsAreLinkable(student_ids);
-      if (!check.valid) {
-        return res.status(400).json({ message: check.message });
-      }
+      if (!check.valid) return res.status(400).json({ message: check.message });
     }
 
     const parent = new Parent({
-      father_name,
-      mother_name,
+      father_name: father_name || '',
+      mother_name: mother_name || '',
+      guardian_name: guardian_name || '',
       mobile_number,
-      email,
+      email: emailNorm,
       address,
       student_ids: student_ids || [],
       emergency_contact,
@@ -174,35 +171,32 @@ router.post('/', async (req, res) => {
       password,
       status: status || 'Active',
       notes: notes || '',
+      source: 'manual',
+      auto_created: false,
       sync_status: 'pending',
     });
 
     const savedParent = await parent.save();
     await savedParent.populate('student_ids', 'name class_id section rollNumber');
 
-    // Auto-sync to mobile backend
     let syncResult = null;
-    if (process.env.MOBILE_BACKEND_URL) {
+    if (shouldSync(savedParent)) {
       syncResult = await syncToMobileBackend(savedParent);
       if (syncResult.success) {
         savedParent.sync_status = 'synced';
         savedParent.synced_at = new Date();
-        await savedParent.save();
       } else {
         savedParent.sync_status = 'failed';
         savedParent.sync_error = syncResult.error;
         savedParent.sync_attempts = 1;
-        await savedParent.save();
       }
+      await savedParent.save();
     }
 
     const parentResponse = savedParent.toObject();
     delete parentResponse.password;
 
-    res.status(201).json({
-      ...parentResponse,
-      sync: syncResult || { message: 'Sync not configured' },
-    });
+    res.status(201).json({ ...parentResponse, sync: syncResult || { message: 'Sync not configured' } });
   } catch (error) {
     console.error('Error creating parent:', error);
     res.status(400).json({ message: error.message });
@@ -252,7 +246,7 @@ router.post('/:id/link-student', async (req, res) => {
 
     // Auto-sync to mobile
     let syncResult = null;
-    if (process.env.MOBILE_BACKEND_URL) {
+    if (shouldSync(parent)) {
       syncResult = await syncToMobileBackend(parent);
       if (syncResult.success) {
         parent.sync_status = 'synced';
@@ -314,7 +308,7 @@ router.delete('/:id/link-student/:studentId', async (req, res) => {
 
     // Auto-sync to mobile
     let syncResult = null;
-    if (process.env.MOBILE_BACKEND_URL) {
+    if (shouldSync(parent)) {
       syncResult = await syncToMobileBackend(parent);
       if (syncResult.success) {
         parent.sync_status = 'synced';
@@ -346,6 +340,13 @@ router.post('/:id/force-resync', async (req, res) => {
 
     if (!parent) {
       return res.status(404).json({ message: 'Parent not found' });
+    }
+
+    if (!parent.login_enabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'This parent has no login yet. Set a password first, then sync.',
+      });
     }
 
     const syncResult = await syncToMobileBackend(parent);
@@ -382,6 +383,7 @@ router.post('/:id/force-resync', async (req, res) => {
 router.post('/bulk-sync', async (req, res) => {
   try {
     const pendingParents = await Parent.find({
+      login_enabled: true,
       sync_status: { $in: ['pending', 'failed'] },
     }).populate('student_ids', 'name class_id section rollNumber');
 
@@ -441,52 +443,46 @@ router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const existingParent = await Parent.findById(id);
-
-    if (!existingParent) {
-      return res.status(404).json({ message: 'Parent not found' });
-    }
+    if (!existingParent) return res.status(404).json({ message: 'Parent not found' });
 
     const {
-      father_name,
-      mother_name,
-      mobile_number,
-      email,
-      address,
-      student_ids,
-      emergency_contact,
-      contact_person_role,
-      password,
-      status,
-      notes,
+      father_name, mother_name, guardian_name, mobile_number, email, address,
+      student_ids, emergency_contact, contact_person_role, password, status, notes,
     } = req.body;
 
-    // Check if email/mobile already exists for other users (username removed)
-    const duplicateCheck = await Parent.findOne({
-      _id: { $ne: id },
-      $or: [{ email }, { mobile_number }],
-    });
+    const emailNorm = (email || '').trim().toLowerCase();
 
-    if (duplicateCheck) {
-      return res.status(400).json({
-        message: 'Email or mobile number already exists for another parent',
-      });
+    if (!(father_name || '').trim() && !(mother_name || '').trim() && !(guardian_name || '').trim()) {
+      return res.status(400).json({ message: "At least one of Father's, Mother's or Guardian's name is required" });
     }
 
-    // Make sure any newly-selected students aren't linked to a different parent
+    // Password is optional on edit, but if given it must be valid
+    if (password && password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    }
+
+    const duplicateCheck = await Parent.findOne({
+      _id: { $ne: id },
+      $or: [{ email: emailNorm }, { mobile_number }],
+    });
+    if (duplicateCheck) {
+      return res.status(400).json({ message: 'Email or mobile number already exists for another parent' });
+    }
+
+    const nextStudentIds = student_ids !== undefined ? student_ids : existingParent.student_ids;
     if (student_ids) {
       const check = await ensureStudentsAreLinkable(student_ids, id);
-      if (!check.valid) {
-        return res.status(400).json({ message: check.message });
-      }
+      if (!check.valid) return res.status(400).json({ message: check.message });
     }
 
     const updateData = {
-      father_name,
-      mother_name,
+      father_name: father_name || '',
+      mother_name: mother_name || '',
+      guardian_name: guardian_name || '',
       mobile_number,
-      email,
+      email: emailNorm,
       address,
-      student_ids: student_ids || [],
+      student_ids: nextStudentIds,
       emergency_contact,
       contact_person_role: contact_person_role || 'Father',
       status: status || 'Active',
@@ -495,19 +491,21 @@ router.put('/:id', async (req, res) => {
       sync_status: 'pending',
     };
 
-    // Only update password if provided
-    if (password && password !== existingParent.password) {
+    // findByIdAndUpdate bypasses the pre-save hook, so hash + flag manually
+    let passwordJustSet = false;
+    if (password) {
       const salt = await bcrypt.genSalt(10);
       updateData.password = await bcrypt.hash(password, salt);
+      updateData.login_enabled = true;
+      passwordJustSet = true;
     }
 
     const parent = await Parent.findByIdAndUpdate(id, updateData, { new: true });
     await parent.populate('student_ids', 'name class_id section rollNumber');
 
-    // Optional sync
     let syncResult = null;
     try {
-      if (process.env.MOBILE_BACKEND_URL && process.env.MOBILE_SYNC_ENABLED !== 'false') {
+      if (shouldSync(parent) && process.env.MOBILE_SYNC_ENABLED !== 'false') {
         syncResult = await syncToMobileBackend(parent);
         if (syncResult && syncResult.success) {
           parent.sync_status = 'synced';
@@ -523,7 +521,7 @@ router.put('/:id', async (req, res) => {
         }
       }
     } catch (syncError) {
-      console.warn(`Sync warning:`, syncError.message);
+      console.warn('Sync warning:', syncError.message);
     }
 
     const parentResponse = parent.toObject();
@@ -531,6 +529,7 @@ router.put('/:id', async (req, res) => {
 
     res.json({
       ...parentResponse,
+      login_just_enabled: passwordJustSet && !existingParent.login_enabled,
       sync: syncResult || { message: 'Sync not configured' },
     });
   } catch (error) {
@@ -554,6 +553,7 @@ router.get('/stats/overview', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
 // Delete parent
 router.delete('/:id', async (req, res) => {
   try {
@@ -565,7 +565,7 @@ router.delete('/:id', async (req, res) => {
     }
 
     // Notify mobile backend about deletion
-    if (process.env.MOBILE_BACKEND_URL && process.env.MOBILE_SYNC_ENABLED !== 'false') {
+    if (shouldSync(parent) && process.env.MOBILE_SYNC_ENABLED !== 'false') {
       try {
         const axios = require('axios');
         await axios.delete(`${process.env.MOBILE_BACKEND_URL}/api/sync/parent/${parent._id}`, {
