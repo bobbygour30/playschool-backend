@@ -11,6 +11,7 @@ const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudina
 const { dueDateFor, forceDueDate, monthKey } = require('../utils/feeDates');
 const { upsertParentFromStudent } = require('../utils/parentAutoSync');
 const { findDuplicateStudent, acquireLock, releaseLock } = require('../utils/studentDuplicate');
+const { ensureStudentFeeRecord } = require('../utils/studentFeeSync');
 const {
   archiveStudentWithFees,
   parseArchiveReason,
@@ -160,91 +161,6 @@ const syncStudentToMobile = async (studentData, isDelete = false) => {
     }
   } catch (error) {
     console.error('Sync to mobile error:', error.message);
-    return { success: false, error: error.message };
-  }
-};
-
-// Helper function to create initial fee invoice and payment record
-// Creates the first invoice and records the payment properly (with history).
-const createInitialFeeInvoice = async (studentData, paymentInfo) => {
-  try {
-    const existingInvoice = await Fee.findOne({
-      student_id: studentData._id,
-      notes: /Initial invoice/,
-    });
-    if (existingInvoice) {
-      return { success: false, message: 'Initial invoice already exists', invoice: existingInvoice };
-    }
-
-    const rf = studentData.recurring_fees || {};
-    const startMonth = rf.start_month || monthKey(0);
-    const dueDay = rf.monthly_due_day || 5;
-    const amount = parseFloat(paymentInfo?.initial_payment_amount) || 0;
-    const paymentMethod = paymentInfo?.payment_mode || 'Cash';
-    const paymentDate = paymentInfo?.payment_date ? new Date(paymentInfo.payment_date) : new Date();
-    const transactionId = paymentInfo?.transaction_id || '';
-
-    // total_amount is calculated by Fee's pre-save from these components
-    const invoice = new Fee({
-      student_id: studentData._id,
-      registration_fee: studentData.registration_fee || 0,
-      admission_fee: studentData.admission_fee || 0,
-      kit_fee: studentData.kit_fee || 0,
-      camera_fee: studentData.camera_fee || 0,
-      tuition_fee: rf.tuition_fee || 0,
-      activity_fee: rf.activity_fee || 0,
-      transport_fee: rf.transport_fee || 0,
-      due_date: dueDateFor(startMonth, dueDay),
-      payment_method: paymentMethod,
-      notes: `Initial invoice for ${studentData.name} - ${startMonth}`,
-      fee_period: {
-        start_date: new Date(startMonth + '-01'),
-        end_date: new Date(new Date(startMonth + '-01').setMonth(new Date(startMonth + '-01').getMonth() + 1) - 1),
-        month: startMonth,
-      },
-      fee_plan: rf.fee_plan || 'Monthly',
-      is_recurring: true,
-      generated_for_month: startMonth,
-      recurring_fees: {
-        tuition_fee: rf.tuition_fee || 0,
-        activity_fee: rf.activity_fee || 0,
-        transport_fee: rf.transport_fee || 0,
-        total_monthly: rf.total_monthly || 0,
-        monthly_due_day: dueDay,
-      },
-    });
-    await invoice.save();
-
-    if (amount > 0) {
-      const total = invoice.total_amount || 0;
-      await invoice.recordPayment({
-        amount,
-        payment_date: paymentDate,
-        payment_method: paymentMethod,
-        transaction_id: transactionId,
-        payment_type: amount > total ? 'advance' : amount < total ? 'partial' : 'full',
-        notes: `Initial payment for ${studentData.name}`,
-      });
-    }
-
-    const fullyPaid = amount > 0 && amount >= (invoice.total_amount || 0);
-    studentData.fee_paid = fullyPaid;
-    studentData.payment_date = amount > 0 ? paymentDate : null;
-    studentData.payment_mode = paymentMethod;
-    studentData.recurring_fees.initial_payment = {
-      amount,
-      paid: amount > 0,
-      payment_date: amount > 0 ? paymentDate : null,
-      payment_method: paymentMethod,
-      invoice_id: invoice._id,
-      transaction_id: transactionId,
-    };
-    studentData.recurring_fees.last_generated_month = startMonth;
-    await studentData.save();
-
-    return { success: true, invoice, message: 'Initial invoice created' };
-  } catch (error) {
-    console.error('Error creating initial invoice:', error);
     return { success: false, error: error.message };
   }
 };
@@ -804,57 +720,28 @@ router.post('/', async (req, res) => {
     const student = new Student(studentData);
     const savedStudent = await student.save();
 
-    let initialInvoiceResult = null;
-    if (fee_paid && !fee_exempt && recurringTotal > 0) {
-      const ip = recurring_fees?.initial_payment || {};
-      const paymentInfo = {
-        initial_payment_amount: ip.amount,
-        payment_date: ip.payment_date || payment_date || new Date(),
-        payment_mode: ip.payment_method || payment_mode || 'Cash',
-        transaction_id: ip.transaction_id || '',
-      };
-      initialInvoiceResult = await createInitialFeeInvoice(savedStudent, paymentInfo);
-      console.log(`📄 Initial invoice created for ${savedStudent.name}: ${initialInvoiceResult.success ? 'Success' : 'Failed'}`);
-    } else if (recurringTotal > 0 && !fee_exempt) {
-      const startMonth = savedStudent.recurring_fees?.start_month || monthKey(0);
-      const dueDay = savedStudent.recurring_fees?.monthly_due_day || 5;
-      const dueDate = dueDateFor(startMonth, dueDay);
+    // 💰 Every student ALWAYS gets a fee record in Finance (single code path, errors are reported, not swallowed)
+    const ip = recurring_fees?.initial_payment || {};
+    const initialAmount = parseFloat(ip.amount) || 0;
+    const paymentInfo =
+      fee_paid && !fee_exempt && initialAmount > 0
+        ? {
+            amount: initialAmount,
+            payment_date: ip.payment_date || payment_date || new Date(),
+            payment_method: ip.payment_method || payment_mode || 'Cash',
+            transaction_id: ip.transaction_id || '',
+          }
+        : null;
 
-      const invoiceData = {
-        student_id: savedStudent._id,
-        registration_fee: savedStudent.registration_fee || 0,
-        admission_fee: savedStudent.admission_fee || 0,
-        tuition_fee: savedStudent.recurring_fees?.tuition_fee || 0,
-        activity_fee: savedStudent.recurring_fees?.activity_fee || 0,
-        transport_fee: savedStudent.recurring_fees?.transport_fee || 0,
-        kit_fee: savedStudent.kit_fee || 0,
-        camera_fee: savedStudent.camera_fee || 0,
-        due_date: dueDate,
-        notes: `Initial invoice for ${savedStudent.name} - ${startMonth} (Pending)`,
-        fee_period: {
-          start_date: new Date(startMonth + '-01'),
-          end_date: new Date(new Date(startMonth + '-01').setMonth(new Date(startMonth + '-01').getMonth() + 1) - 1),
-          month: startMonth,
-        },
-        fee_plan: savedStudent.recurring_fees?.fee_plan || 'Monthly',
-        is_recurring: true,
-        generated_for_month: startMonth,
-        recurring_fees: {
-          tuition_fee: savedStudent.recurring_fees?.tuition_fee || 0,
-          activity_fee: savedStudent.recurring_fees?.activity_fee || 0,
-          transport_fee: savedStudent.recurring_fees?.transport_fee || 0,
-          total_monthly: savedStudent.recurring_fees?.total_monthly || 0,
-          monthly_due_day: dueDay,
-        },
-      };
-
-      const invoice = new Fee(invoiceData);
-      await invoice.save();
-      console.log(`📄 Initial invoice created for ${savedStudent.name} (status: ${invoice.status})`);
+    let feeSyncResult;
+    try {
+      feeSyncResult = await ensureStudentFeeRecord(savedStudent, { coverage: 'start', paymentInfo });
+      console.log(`💰 Fee record for ${savedStudent.name}: ${feeSyncResult.action}`);
+    } catch (feeErr) {
+      console.error('Fee record creation failed:', feeErr.message);
+      feeSyncResult = { action: 'error', reason: feeErr.message };
     }
-
-    const feeSyncResult = await syncStudentFeesToFinance(savedStudent, false);
-    console.log(`💰 Fee sync result for ${savedStudent.name}: ${feeSyncResult.action}`);
+    const initialInvoiceResult = feeSyncResult; // kept so the response block below still works
 
     const syncResult = await syncStudentToMobile(savedStudent);
 
@@ -1186,6 +1073,15 @@ router.put('/:id', async (req, res) => {
     const feeSyncResult = await syncStudentFeesToFinance(student, true);
     console.log(`💰 Fee sync result for ${student.name}: ${feeSyncResult.action}`);
 
+    // Safety net: guarantee start-month + current-month invoices exist (e.g. an old student edited today)
+    let feeRecordResult = null;
+    try {
+      feeRecordResult = await ensureStudentFeeRecord(student, { coverage: 'current' });
+    } catch (feeErr) {
+      console.error('Fee record safety net failed:', feeErr.message);
+      feeRecordResult = { action: 'error', reason: feeErr.message };
+    }
+
     const syncResult = await syncStudentToMobile(student);
 
     // 👨‍👩‍👧 Keep Parent Registration in step (e.g. parent email/name corrected on the student)
@@ -1200,6 +1096,7 @@ router.put('/:id', async (req, res) => {
     const responseData = student.toObject();
     responseData.sync = syncResult;
     responseData.feeSync = feeSyncResult;
+    responseData.feeRecord = feeRecordResult;
     responseData.parentSync = parentSyncResult;
 
     res.json(responseData);
