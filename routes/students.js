@@ -10,6 +10,7 @@ const { STANDARD_CLASSES } = require('../utils/classHelper');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 const { dueDateFor, forceDueDate, monthKey } = require('../utils/feeDates');
 const { upsertParentFromStudent } = require('../utils/parentAutoSync');
+const { findDuplicateStudent, acquireLock, releaseLock } = require('../utils/studentDuplicate');
 const {
   archiveStudentWithFees,
   parseArchiveReason,
@@ -631,6 +632,24 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: teacherError });
     }
 
+    // ⛔ Duplicate student guard (parents may repeat, students may not)
+    const lock = acquireLock({ name, date_of_birth, parent_email });
+    if (!lock) {
+      return res.status(409).json({
+        message: 'This student is already being saved. Please wait a moment and refresh.',
+      });
+    }
+    res.on('finish', () => releaseLock(lock));
+    res.on('close', () => releaseLock(lock));
+
+    const duplicate = await findDuplicateStudent({ name, date_of_birth, parent_email, parent_phone });
+    if (duplicate) {
+      return res.status(409).json({
+        message: `${duplicate.name} (DOB ${new Date(duplicate.date_of_birth).toISOString().split('T')[0]}) is already registered with this parent. A student cannot be added twice.`,
+        duplicate_student_id: duplicate._id,
+      });
+    }
+
     const uploadedDocuments = {};
 
     if (documents) {
@@ -922,6 +941,18 @@ router.put('/:id', async (req, res) => {
       fee_structure,
       recurring_fees,
     } = req.body;
+
+    // ⛔ Editing must not turn this student into a copy of another one
+    const duplicate = await findDuplicateStudent(
+      { name, date_of_birth, parent_email, parent_phone },
+      id
+    );
+    if (duplicate) {
+      return res.status(409).json({
+        message: `Another student named ${duplicate.name} with the same date of birth and parent already exists.`,
+        duplicate_student_id: duplicate._id,
+      });
+    }
 
     // Resolve teacher automatically (unless student is Graduated)
     let resolvedTeacherId = null;
